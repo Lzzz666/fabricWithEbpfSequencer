@@ -51,7 +51,13 @@ func (gs *Server) Submit(ctx context.Context, request *gp.SubmitRequest) (*gp.Su
 		return nil, status.Errorf(codes.Unavailable, "no orderer nodes available")
 	}
 
-	logger := logger.With("txID", request.TransactionId)
+	logger := logger.With("txID", request.TransactionId) // txID
+
+	fmt.Println("[Debug]request.TransactionId", request.TransactionId)
+
+	txid := request.TransactionId
+	fmt.Println("[Debug]txid", txid)
+
 	config := gs.getChannelConfig(request.ChannelId)
 	oc, ok := config.OrdererConfig()
 	if !ok {
@@ -60,7 +66,8 @@ func (gs *Server) Submit(ctx context.Context, request *gp.SubmitRequest) (*gp.Su
 	if oc.ConsensusType() == "BFT" {
 		return gs.submitBFT(ctx, orderers, txn, clusterSize, logger)
 	} else {
-		return gs.submitNonBFT(ctx, orderers, txn, logger)
+		// return gs.submitNonBFT(ctx, orderers, txn, logger)
+		return gs.submitNonBFTonly(ctx, orderers, txn, logger, txid)
 	}
 }
 
@@ -167,6 +174,9 @@ func (gs *Server) submitNonBFT(ctx context.Context, orderers []*orderer, txn *co
 	// non-BFT - only need one successful response
 	// try each orderer in random order
 	logger.Infow("Sending transaction to orderer", "Count:", count)
+
+	fmt.Println("[Debug]logger", logger.Zap())
+	fmt.Println("[Debug]txn", txn)
 	count++
 
 	err := gs.broadcastByUDP(txn)
@@ -175,6 +185,41 @@ func (gs *Server) submitNonBFT(ctx context.Context, orderers []*orderer, txn *co
 	}
 
 	return nil, nil
+}
+func (gs *Server) submitNonBFTonly(ctx context.Context, orderers []*orderer, txn *common.Envelope, logger *flogging.FabricLogger, txid string) (*gp.SubmitResponse, error) {
+	fmt.Println("[Debug]txid", txid)
+
+	err := gs.broadcastByUDPwithTxID(txid)
+	if err != nil {
+		return &gp.SubmitResponse{}, err
+	}
+
+	return nil, nil
+}
+
+func (gs *Server) broadcastByUDPwithTxID(txid string) error {
+
+	txidBytes := []byte(txid)
+	seqBytes := []byte{0x00, 0x00, 0x00, 0x00} // The extra bytes you want to add
+	dataWithseqBytes := append(txidBytes, seqBytes...)
+	frontResver := []byte{0x00, 0x00}
+	newType := append(frontResver, dataWithseqBytes...)
+
+	_, err := gs.UdpGateway.Write(newType)
+	if err != nil {
+		// Attempt to reconnect
+		if err := gs.reconnect(); err != nil {
+			return fmt.Errorf("failed to reconnect: %w", err)
+		}
+
+		// Retry sending the message after reconnecting
+		_, err = gs.UdpGateway.Write(newType)
+		if err != nil {
+			return fmt.Errorf("failed to resend message after reconnecting: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func (gs *Server) broadcast(ctx context.Context, orderer *orderer, txn *common.Envelope) (*ab.BroadcastResponse, error) {
