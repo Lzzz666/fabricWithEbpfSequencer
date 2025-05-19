@@ -42,6 +42,7 @@ func main() {
 			continue
 		}
 		fmt.Printf("Received %d bytes: %s\n", n, buffer[:n])
+		fmt.Printf("Received %d bytes: %s\n", n, buffer)
 		// Extract the extra bytes from the tail
 		if n < 2 {
 			fmt.Println("Not enough data received")
@@ -59,7 +60,7 @@ func main() {
 		addrs := [9]string{"localhost", "localhost", "localhost", "localhost", "localhost", "localhost", "localhost", "localhost"}
 		for i := 8 - broadcastCount; i < 8; i++ {
 			ordererAddress := net.JoinHostPort(addrs[i], ports[i])
-			fmt.Println("Brocast to orderer address:", ordererAddress)
+			fmt.Println("broadcast to orderer address:", ordererAddress)
 			ordererServerAddr, err := net.ResolveUDPAddr("udp", ordererAddress)
 			if err != nil {
 				fmt.Println("Error resolving address:", err)
@@ -70,13 +71,13 @@ func main() {
 			if err != nil {
 				fmt.Println("Error connecting to server:", err)
 			}
-
+			fmt.Println("dataWithseqBytes:", dataWithseqBytes)
 			err = forward(dataWithseqBytes, ordererConn) // Use local err to avoid data race
 			if err != nil {
 				fmt.Println("Error forward to orderer:", err)
 			}
 		}
-
+		fmt.Println("Successful broadcast")
 		count++
 
 		// Optionally, respond to the client

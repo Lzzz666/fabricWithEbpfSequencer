@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"strconv"
@@ -60,6 +61,19 @@ func (us *UdpServer) Start() error {
 				fmt.Println("Not enough data received")
 				continue
 			}
+
+			// 2) 拆出序号（你是 little-endian）
+			seq := binary.LittleEndian.Uint32(buffer[n-4 : n])
+			fmt.Printf("Sequence number: %d\n", seq)
+
+			// 3) 真正的 protobuf 数据就是 [0 : n-4]
+			rawProto := buffer[:n-4]
+
+			// 4) 再次 hex dump 截取后的部分，确认没问题
+			fmt.Printf("── Raw protobuf (%d bytes) ──\n%s\n", len(rawProto), hex.Dump(rawProto))
+
+			// -----
+
 			extraBytes := buffer[n-4 : n] // The last 2 bytes are the extra bytes
 			fmt.Printf("Received extra bytes: %x\n", extraBytes)
 
@@ -71,12 +85,14 @@ func (us *UdpServer) Start() error {
 				fmt.Println("Error decoding Big Endian value:", err)
 			}
 			fmt.Printf("Big Endian interpreted value (uint64): %d (0x%x)\n", bigEndianValue, bigEndianValue)
-
+			fmt.Printf("buffer as string: %q\n", buffer[2:n-4])
 			// Unmarshal the remaining part into the Envelope struct (excluding the last 2 bytes)
 			envelope := &common.Envelope{}
 			err = proto.Unmarshal(buffer[2:n-4], envelope)
+			// err = proto.Unmarshal(buffer[:n-4], envelope)
 			if err != nil {
 				fmt.Println("Failed to unmarshal envelope:", err)
+				fmt.Println("common/server")
 				continue
 			}
 
