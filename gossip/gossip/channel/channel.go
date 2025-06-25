@@ -26,6 +26,7 @@ import (
 	"github.com/hyperledger/fabric/gossip/gossip/algo"
 	"github.com/hyperledger/fabric/gossip/gossip/msgstore"
 	"github.com/hyperledger/fabric/gossip/gossip/pull"
+	"github.com/hyperledger/fabric/gossip/gossip/txn"
 	"github.com/hyperledger/fabric/gossip/metrics"
 	"github.com/hyperledger/fabric/gossip/protoext"
 	"github.com/hyperledger/fabric/gossip/util"
@@ -151,6 +152,7 @@ type gossipChannel struct {
 	joinMsg                   api.JoinChannelMessage
 	blockMsgStore             msgstore.MessageStore
 	stateInfoMsgStore         *stateInfoCache
+	txnMsgStore               tnxstore.TransactionStore
 	leaderMsgStore            msgstore.MessageStore
 	chainID                   common.ChannelID
 	blocksPuller              pull.Mediator
@@ -161,7 +163,7 @@ type gossipChannel struct {
 	ledgerHeight              uint64
 	incTime                   uint64
 	leftChannel               int32
-	membershipTracker         *membershipTracker
+	membershipTracker         *membershipTracker // 新增的 transaction mempool
 }
 
 type membershipFilter struct {
@@ -282,6 +284,11 @@ func NewGossipChannel(pkiID common.PKIidType, org api.OrgIdentityType, mcs api.M
 	pol := protoext.NewGossipMessageComparator(0)
 
 	gc.leaderMsgStore = msgstore.NewMessageStoreExpirable(pol, msgstore.Noop, ttl, nil, nil, nil)
+
+	gc.txnMsgStore = tnxstore.NewTransactionStore(
+		protoext.NewGossipMessageComparator(0),
+		tnxstore.Noop,
+	)
 
 	gc.ConfigureChannel(joinMsg)
 
@@ -598,12 +605,24 @@ func (gc *gossipChannel) ConfigureChannel(joinMsg api.JoinChannelMessage) {
 }
 
 // HandleMessage processes a message sent by a remote peer
+// 這裡會收到其他節點的 gossip message (目前只有 stateInfo 和 block)
 func (gc *gossipChannel) HandleMessage(msg protoext.ReceivedMessage) {
 	if !gc.verifyMsg(msg) {
 		gc.logger.Warning("Failed verifying message:", msg.GetGossipMessage().GossipMessage)
 		return
 	}
 	m := msg.GetGossipMessage()
+	gc.logger.Warningf("[Debug by lz] peer Received message: %v", m.GossipMessage)
+	// 判斷是否 message 是 dataMsg 或 stateInfoMsg
+	gc.logger.Warningf("[Debug by lz] protoext.IsDataMsg(m.GossipMessage): %v", protoext.IsDataMsg(m.GossipMessage))
+	gc.logger.Warningf("[Debug by lz] protoext.IsTxnMsg(m.GossipMessage): %v", protoext.IsTxnMsg(m.GossipMessage))
+	gc.logger.Warningf("[Debug by lz] protoext.IsStateInfoMsg(m.GossipMessage): %v", protoext.IsStateInfoMsg(m.GossipMessage))
+	gc.logger.Warningf("[Debug by lz] protoext.IsChannelRestricted(m.GossipMessage): %v", protoext.IsChannelRestricted(m.GossipMessage))
+	gc.logger.Warningf("[Debug by lz] protoext.IsStateInfoPullRequestMsg(m.GossipMessage): %v", protoext.IsStateInfoPullRequestMsg(m.GossipMessage))
+	gc.logger.Warningf("[Debug by lz] protoext.IsStateInfoSnapshot(m.GossipMessage): %v", protoext.IsStateInfoSnapshot(m.GossipMessage))
+	gc.logger.Warningf("[Debug by lz] protoext.IsDataUpdate(m.GossipMessage): %v", protoext.IsDataUpdate(m.GossipMessage))
+	gc.logger.Warningf("[Debug by lz] protoext.IsLeadershipMsg(m.GossipMessage): %v", protoext.IsLeadershipMsg(m.GossipMessage))
+
 	if !protoext.IsChannelRestricted(m.GossipMessage) {
 		gc.logger.Warning("Got message", msg.GetGossipMessage(), "but it's not a per-channel message, discarding it")
 		return
@@ -637,6 +656,19 @@ func (gc *gossipChannel) HandleMessage(msg protoext.ReceivedMessage) {
 				gc.logger.Warning("Payload is empty, got it from", msg.GetConnectionInfo().ID)
 				return
 			}
+
+			// Check if this is a transaction message
+			if protoext.IsTxnMsg(m.GossipMessage) {
+				gc.logger.Warningf("[TxnMsg] Received transaction message from %v", msg.GetConnectionInfo().ID)
+				// Handle transaction message differently
+				gc.handleTxnMessage(m.GossipMessage, msg.GetConnectionInfo().ID)
+				// Still forward and demultiplex for transaction messages
+				// gc.Forward(msg)
+				// gc.DeMultiplex(m)
+				return
+			}
+
+			// Regular block message processing
 			// Would this block go into the message store if it was verified?
 			if !gc.blockMsgStore.CheckValid(msg.GetGossipMessage()) {
 				return
@@ -750,6 +782,42 @@ func (gc *gossipChannel) HandleMessage(msg protoext.ReceivedMessage) {
 	}
 }
 
+// handleTxnMessage processes transaction messages specifically
+func (gc *gossipChannel) handleTxnMessage(m *proto.GossipMessage, sender common.PKIidType) {
+	payload := m.GetDataMsg().Payload
+	if payload == nil {
+		gc.logger.Warning("[TxnMsg] Empty transaction payload from", sender)
+		return
+	}
+
+	gc.logger.Infof("[TxnMsg] Processing transaction from %v", sender)
+	gc.logger.Infof("[TxnMsg] Transaction payload size: %d bytes", len(payload.Data))
+	gc.logger.Infof("[TxnMsg] Transaction hex: %x", payload.Data)
+
+	// Verify transaction envelope
+	txnEnvelope, err := protoutil.UnmarshalEnvelope(payload.Data)
+	if err != nil {
+		gc.logger.Warningf("[TxnMsg] Failed to unmarshal transaction from %v: %+v", sender, err)
+		return
+	}
+
+	gc.logger.Infof("[TxnMsg] Successfully processed transaction from %v", sender)
+	gc.logger.Infof("[TxnMsg] Transaction envelope payload size: %d bytes", len(txnEnvelope.Payload))
+
+	// 將 transaction 加入到 mempool 中
+	// 參考 block 的
+	gc.txnMsgStore.Add(txnEnvelope.Payload)
+	gc.logger.Infof("[TxnMsg] Transaction added to mempool")
+	gc.logger.Infof("[TxnMsg] Mempool size: %d", gc.txnMsgStore.Size())
+	gc.logger.Infof("[TxnMsg] Mempool transactions: %v", gc.txnMsgStore.Get())
+	// 之後就是要把 mempool 的 transaction 拿出來並且正確變回原來的 transaction 格式 並且塞進 block 中
+
+	if err != nil {
+		gc.logger.Warningf("[TxnMsg] Failed to unmarshal transaction from %v: %+v", sender, err)
+		return
+	}
+}
+
 func (gc *gossipChannel) handleStateInfSnapshot(m *proto.GossipMessage, sender common.PKIidType) {
 	chanName := string(gc.chainID)
 	for _, envelope := range m.GetStateSnapshot().Elements {
@@ -809,20 +877,62 @@ func (gc *gossipChannel) verifyBlock(msg *proto.GossipMessage, sender common.PKI
 		gc.logger.Warning("Received empty payload from", sender)
 		return false
 	}
+
+	gc.logger.Warningf("[Debug by lz] Received Txn data from %v", sender)
+	gc.logger.Warningf("[Debug by lz] Payload size: %d bytes", len(payload.Data))
+	gc.logger.Warningf("[Debug by lz] Payload hex: %x", payload.Data)
+	gc.logger.Warningf("[Debug by lz] Sequence number: %d", payload.SeqNum)
+
 	seqNum := payload.SeqNum
 	rawBlock := payload.Data
+
+	if seqNum == 0xFFFFFFFFFFFFFFFF {
+		// 这是 Transaction，不是 Block
+		txnEnvelope, err := protoutil.UnmarshalEnvelope(rawBlock)
+		if err != nil {
+			gc.logger.Warningf("[Debug by lz] Failed to unmarshal transaction from %v: %+v", sender, err)
+			return false
+		}
+
+		gc.logger.Warning("[Debug by lz] Successfully received transaction from", sender)
+		gc.logger.Warning("[Debug by lz] Transaction payload size: %d bytes", len(txnEnvelope.Payload))
+
+		// 简单处理：记录接收到的 transaction
+		gc.logger.Infof("Received transaction via gossip from peer %v", sender)
+
+		return true
+	}
+
+	// Try to unmarshal the raw data first
 	block, err := protoutil.UnmarshalBlock(rawBlock)
 	if err != nil {
-		gc.logger.Warningf("Received improperly encoded block from %v in DataUpdate: %+v", sender, err)
+		gc.logger.Warningf("[Debug by lz] Block unmarshal error details: %+v", err)
+		gc.logger.Warningf("[Debug by lz] First 100 bytes of raw block: %x", rawBlock[:min(len(rawBlock), 100)])
+		gc.logger.Warningf("[Debug by lz] Received improperly encoded block from %v in DataUpdate: %+v", sender, err)
 		return false
 	}
 
+	gc.logger.Warningf("[Debug by lz] Successfully unmarshaled block:")
+	gc.logger.Warningf("  - Block number: %d", block.Header.Number)
+	gc.logger.Warningf("  - Previous hash: %x", block.Header.PreviousHash)
+	gc.logger.Warningf("  - Data hash: %x", block.Header.DataHash)
+
 	err = gc.mcs.VerifyBlock(msg.Channel, seqNum, block)
 	if err != nil {
+		gc.logger.Warningf("[Debug by lz] Block verification failed: %+v", err)
 		gc.logger.Warningf("Received fabricated block from %v in DataUpdate: %+v", sender, err)
 		return false
 	}
+
+	gc.logger.Warningf("[Debug by lz] Block verification successful")
 	return true
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (gc *gossipChannel) createStateInfoSnapshot(requestersOrg api.OrgIdentityType) *proto.GossipMessage {

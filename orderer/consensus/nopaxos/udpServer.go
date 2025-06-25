@@ -58,6 +58,7 @@ func (us *UdpServer) Start() error {
 			err = proto.Unmarshal(buffer[:n-2], envelope)
 			if err != nil {
 				fmt.Println("Failed to unmarshal envelope:", err)
+				fmt.Println("nopaxos")
 			}
 
 			// Display the received Envelope

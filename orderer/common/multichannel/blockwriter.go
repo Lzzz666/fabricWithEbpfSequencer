@@ -61,6 +61,7 @@ func newBlockWriter(lastBlock *cb.Block, support blockWriterSupport) *BlockWrite
 	return bw
 }
 
+// needToRead
 // CreateNextBlock creates a new block with the next block number, and the given contents.
 func (bw *BlockWriter) CreateNextBlock(messages []*cb.Envelope) *cb.Block {
 	previousBlockHash := protoutil.BlockHeaderHash(bw.lastBlock.Header)

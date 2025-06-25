@@ -17,6 +17,7 @@ import (
 	"github.com/hyperledger/fabric-lib-go/common/flogging"
 	"github.com/hyperledger/fabric-protos-go-apiv2/common"
 	gp "github.com/hyperledger/fabric-protos-go-apiv2/gateway"
+	gproto "github.com/hyperledger/fabric-protos-go-apiv2/gossip"
 	ab "github.com/hyperledger/fabric-protos-go-apiv2/orderer"
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	"github.com/hyperledger/fabric/protoutil"
@@ -27,6 +28,30 @@ import (
 
 var serverAddrStr = os.Getenv("SERVER_ADDR")
 var count uint64 = 0
+
+type TxnGossipMessage struct {
+}
+
+const (
+	TXN_MSG_MARKER = 0xFFFFFFFFFFFFFFFF // Special marker for transaction messages
+)
+
+// CreateTxnMsg creates a gossip message specifically for transactions
+func CreateTxnMsg(channelID string, payloadBytes []byte) *gproto.GossipMessage {
+	return &gproto.GossipMessage{
+		Channel: []byte(channelID),
+		Tag:     gproto.GossipMessage_CHAN_AND_ORG,
+		Nonce:   uint64(time.Now().UnixNano()),
+		Content: &gproto.GossipMessage_DataMsg{
+			DataMsg: &gproto.DataMessage{
+				Payload: &gproto.Payload{
+					Data:   payloadBytes,
+					SeqNum: TXN_MSG_MARKER, // Use special marker to identify as transaction
+				},
+			},
+		},
+	}
+}
 
 // Submit will send the signed transaction to the ordering service. The response indicates whether the transaction was
 // successfully received by the orderer. This does not imply successful commit of the transaction, only that is has
@@ -67,7 +92,7 @@ func (gs *Server) Submit(ctx context.Context, request *gp.SubmitRequest) (*gp.Su
 		return gs.submitBFT(ctx, orderers, txn, clusterSize, logger)
 	} else {
 		// return gs.submitNonBFT(ctx, orderers, txn, logger)
-		return gs.submitNonBFTonly(ctx, orderers, txn, logger, txid)
+		return gs.submitNonBFTseperateTxn(ctx, orderers, txn, logger, txid, request.ChannelId)
 	}
 }
 
@@ -106,6 +131,7 @@ loop:
 	return nil, newRpcError(codes.Unavailable, "insufficient number of orderers could successfully process transaction to satisfy quorum requirement", errDetails...)
 }
 
+// broadcastToAll is used to broadcast the transaction to all orderers
 func (gs *Server) broadcastToAll(orderers []*orderer, txn *common.Envelope, waitCh chan<- *gp.ErrorDetail, logger *flogging.FabricLogger) {
 	everyoneSubmitted := make(chan struct{})
 	var numFinishedSend uint32
@@ -186,15 +212,59 @@ func (gs *Server) submitNonBFT(ctx context.Context, orderers []*orderer, txn *co
 
 	return nil, nil
 }
-func (gs *Server) submitNonBFTonly(ctx context.Context, orderers []*orderer, txn *common.Envelope, logger *flogging.FabricLogger, txid string) (*gp.SubmitResponse, error) {
-	fmt.Println("[Debug]txid", txid)
+func (gs *Server) submitNonBFTseperateTxn(ctx context.Context, orderers []*orderer, txn *common.Envelope, logger *flogging.FabricLogger, txid string, channelID string) (*gp.SubmitResponse, error) {
 
+	fmt.Println("[Debug by lz]txid", txid)
 	err := gs.broadcastByUDPwithTxID(txid)
 	if err != nil {
 		return &gp.SubmitResponse{}, err
 	}
 
+	// TODO: seperate payload and send to each peer
+	err = gs.broadcastTxnToAllPeers(txn, logger, channelID)
+	if err != nil {
+		return &gp.SubmitResponse{}, err
+	}
+
 	return nil, nil
+}
+
+func (gs *Server) broadcastTxnToAllPeers(txn *common.Envelope, logger *flogging.FabricLogger, channelID string) error {
+	// 1. 獲取 channel 中的所有 peer
+	peers := gs.registry.channelMembers(channelID)
+
+	fmt.Printf("[Debug by lz] Found %d peers in channel %s\n", len(peers), channelID)
+	for i, peer := range peers {
+		fmt.Printf("[Debug by lz] Peer[%d]: Endpoint=%s\n", i, peer.Endpoint)
+	}
+
+	if len(peers) == 0 {
+		return fmt.Errorf("no peers found in channel %s", channelID)
+	}
+
+	// 2. 將 Envelope 序列化為 bytes
+	payloadBytes, err := proto.Marshal(txn)
+	if err != nil {
+		return fmt.Errorf("failed to marshal transaction envelope: %v", err)
+	}
+	fmt.Printf("[Debug by lz] Transaction payload size: %d bytes\n", len(payloadBytes))
+	fmt.Printf("[Debug by lz] Transaction payload hex: %x\n", payloadBytes)
+
+	// 3. 建立 gossip transaction message
+	gossipMsg := CreateTxnMsg(channelID, payloadBytes)
+
+	fmt.Printf("[Debug by lz] Created gossip message for channel: %s\n", channelID)
+	fmt.Printf("[Debug by lz] Message details:\n")
+	fmt.Printf("  - Channel: %s\n", string(gossipMsg.Channel))
+	fmt.Printf("  - Tag: %s\n", gossipMsg.Tag.String())
+	fmt.Printf("  - Payload size: %d\n", len(gossipMsg.GetDataMsg().Payload.Data))
+	fmt.Printf("  - SeqNum (Transaction marker): %d\n", gossipMsg.GetDataMsg().Payload.SeqNum)
+
+	// 4. 使用 gossip 發送
+	gs.gossipService.Gossip(gossipMsg)
+	fmt.Printf("[Debug by lz] Gossip message sent to peers\n")
+
+	return nil
 }
 
 func (gs *Server) broadcastByUDPwithTxID(txid string) error {
@@ -222,16 +292,20 @@ func (gs *Server) broadcastByUDPwithTxID(txid string) error {
 	return nil
 }
 
+// 原本的方法 ctx , orderer , txn
 func (gs *Server) broadcast(ctx context.Context, orderer *orderer, txn *common.Envelope) (*ab.BroadcastResponse, error) {
+	// 建立與 orderer 的 gRPC 連線
 	broadcast, err := orderer.client.Broadcast(ctx)
 	if err != nil {
 		return nil, err
 	}
 
+	// 傳送交易到 orderer
 	if err := broadcast.Send(txn); err != nil {
 		return nil, err
 	}
 
+	// 接收回應
 	response, err := broadcast.Recv()
 	if err != nil {
 		return nil, err

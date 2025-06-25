@@ -212,7 +212,6 @@ func (reg *registry) channelMembers(channel string) gossipdiscovery.Members {
 			if ledgerHeight, ok := reg.localLedgerHeight(channel); ok {
 				member.Properties.LedgerHeight = ledgerHeight
 			}
-
 			break
 		}
 	}

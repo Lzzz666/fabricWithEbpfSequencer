@@ -107,7 +107,9 @@ func init() {
 	proto.RegisterType((*ProtocolConfig)(nil), "atomix.nopaxos.config.ProtocolConfig")
 }
 
-func init() { proto.RegisterFile("atomix/nopaxos/config/config.proto", fileDescriptor_ba4cf85fd087c2f8) }
+func init() {
+	proto.RegisterFile("atomix/nopaxos/config/config.proto", fileDescriptor_ba4cf85fd087c2f8)
+}
 
 var fileDescriptor_ba4cf85fd087c2f8 = []byte{
 	// 311 bytes of a gzipped FileDescriptorProto

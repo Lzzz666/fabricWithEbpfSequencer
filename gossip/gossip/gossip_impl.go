@@ -25,6 +25,7 @@ import (
 	"github.com/hyperledger/fabric/gossip/gossip/channel"
 	"github.com/hyperledger/fabric/gossip/gossip/msgstore"
 	"github.com/hyperledger/fabric/gossip/gossip/pull"
+	"github.com/hyperledger/fabric/gossip/gossip/txn"
 	"github.com/hyperledger/fabric/gossip/identity"
 	"github.com/hyperledger/fabric/gossip/metrics"
 	"github.com/hyperledger/fabric/gossip/protoext"
@@ -64,6 +65,7 @@ type Node struct {
 	disSecAdap        *discoverySecurityAdapter
 	mcs               api.MessageCryptoService
 	stateInfoMsgStore msgstore.MessageStore
+	txnMsgStore       tnxstore.TransactionStore
 	certPuller        pull.Mediator
 	gossipMetrics     *metrics.GossipMetrics
 }
@@ -318,6 +320,7 @@ func (g *Node) start() {
 func (g *Node) acceptMessages(incMsgs <-chan protoext.ReceivedMessage) {
 	defer g.logger.Debug("Exiting")
 	defer g.stopSignal.Done()
+	fmt.Println("[DEBUG by lz] accept gossip Messages??")
 	for {
 		select {
 		case <-g.toDieChan:

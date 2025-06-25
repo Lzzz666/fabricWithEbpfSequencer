@@ -11,6 +11,8 @@ import (
 
 var wgg sync.WaitGroup
 
+// This is the sequencer that will receive the "transaction hash" from the client and broadcast it to the orderers
+
 func main() {
 	param1 := os.Args[1] // First argument (should be an integer)
 	broadcastCount, _ := strconv.Atoi(param1)

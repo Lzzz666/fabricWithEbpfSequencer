@@ -16,6 +16,7 @@ import (
 	"github.com/hyperledger/fabric/core/peer"
 	"github.com/hyperledger/fabric/core/scc"
 	gdiscovery "github.com/hyperledger/fabric/gossip/discovery"
+	"github.com/hyperledger/fabric/gossip/service"
 	"github.com/hyperledger/fabric/internal/pkg/comm"
 	"github.com/hyperledger/fabric/internal/pkg/gateway/commit"
 	"github.com/hyperledger/fabric/internal/pkg/gateway/config"
@@ -25,7 +26,37 @@ import (
 
 var logger = flogging.MustGetLogger("gateway")
 
-// Server represents the GRPC server for the Gateway.
+// Server represents the GRPC server for the Gateway (Fabric Gateway).
+
+// The Fabric Gateway client APIs combine the Endorse/Submit/CommitStatus actions
+// into a single blocking SubmitTransaction function to support transaction submission
+// with a single line of code.
+
+// Client
+// │
+// │ submitTransaction()
+// ▼
+// [1] Endorse Phase
+// └─> Send Proposal to Peers A, B, C
+//
+//	←─ Collect Endorsements
+//
+// │
+// [2] Submit Phase
+// └─> Broadcast Transaction (Proposal + Endorsements) to Orderer
+//
+//	←─ Orderer returns acknowledgement
+//
+// │
+// [3] CommitStatus Phase
+// └─> Listen for Block Event from Peers
+//
+//	←─ Receive Commit Confirmation
+//
+// │
+// └─> Return the chaincode execution result to caller
+// https://hyperledger-fabric.readthedocs.io/en/latest/gateway.html
+
 type Server struct {
 	registry         *registry
 	commitFinder     CommitFinder
@@ -35,6 +66,7 @@ type Server struct {
 	ledgerProvider   ledger.Provider
 	getChannelConfig channelConfigGetter
 	UdpGateway       *net.UDPConn
+	gossipService    *service.GossipService
 }
 
 type EndorserServerAdapter struct {
@@ -87,6 +119,9 @@ func CreateServer(
 		peerInstance.OrdererEndpointOverrides,
 		peerInstance.GetChannelConfig,
 	)
+
+	// 設置 gossipService
+	server.gossipService = peerInstance.GossipService
 
 	peerInstance.AddConfigCallbacks(server.registry.configUpdate)
 

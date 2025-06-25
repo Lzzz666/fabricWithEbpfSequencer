@@ -124,6 +124,18 @@ func IsLeadershipMsg(m *gossip.GossipMessage) bool {
 	return m.GetLeadershipMsg() != nil
 }
 
+// IsTxnMsg returns whether this GossipMessage is a transaction message
+// Transaction messages are DataMsg with special sequence number marker
+func IsTxnMsg(m *gossip.GossipMessage) bool {
+
+	dataMsg := m.GetDataMsg()
+	if dataMsg == nil || dataMsg.Payload == nil {
+		return false
+	}
+	// Check for special transaction marker
+	return dataMsg.Payload.SeqNum == 0xFFFFFFFFFFFFFFFF
+}
+
 // IsTagLegal checks the GossipMessage tags and inner type
 // and returns an error if the tag doesn't match the type.
 func IsTagLegal(m *gossip.GossipMessage) error {
