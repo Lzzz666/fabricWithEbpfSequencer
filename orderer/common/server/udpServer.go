@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"net"
 	"strconv"
@@ -42,7 +41,7 @@ func (us *UdpServer) Start() error {
 		return err
 	}
 
-	buffer := make([]byte, 10240)
+	buffer := make([]byte, 128)
 	for {
 		select {
 		case <-us.exitChanUDP:
@@ -62,42 +61,27 @@ func (us *UdpServer) Start() error {
 				continue
 			}
 
-			// 2) 拆出序号（你是 little-endian）
-			seq := binary.LittleEndian.Uint32(buffer[n-4 : n])
-			fmt.Printf("Sequence number: %d\n", seq)
-
-			// 3) 真正的 protobuf 数据就是 [0 : n-4]
-			rawProto := buffer[:n-4]
-
-			// 4) 再次 hex dump 截取后的部分，确认没问题
-			fmt.Printf("── Raw protobuf (%d bytes) ──\n%s\n", len(rawProto), hex.Dump(rawProto))
-
-			// -----
-
-			extraBytes := buffer[n-4 : n] // The last 2 bytes are the extra bytes
-			fmt.Printf("Received extra bytes: %x\n", extraBytes)
+			txidBytes := buffer[2:66]
+			channelIDBytes := buffer[66 : n-4]
+			SeqNum := binary.LittleEndian.Uint32(buffer[n-4 : n]) // The last 2 bytes are the extra bytes
+			fmt.Printf("Received buffer: %x\n", buffer)
+			fmt.Printf("Received txid: %s\n", string(txidBytes))
+			fmt.Printf("Received channelID: %s\n", string(channelIDBytes))
+			fmt.Printf("Received seqBytes: %d\n", SeqNum)
+			seqBytes := buffer[n-4 : n]
+			fmt.Printf("Received extra bytes: %x\n", seqBytes)
 
 			paddedBytes := make([]byte, 8)
-			copy(paddedBytes[:8-len(extraBytes)], extraBytes)
+			copy(paddedBytes[:8-len(seqBytes)], seqBytes)
 			var bigEndianValue uint64
 			err = binary.Read(bytes.NewReader(paddedBytes), binary.LittleEndian, &bigEndianValue)
 			if err != nil {
 				fmt.Println("Error decoding Big Endian value:", err)
 			}
 			fmt.Printf("Big Endian interpreted value (uint64): %d (0x%x)\n", bigEndianValue, bigEndianValue)
-			fmt.Printf("buffer as string: %q\n", buffer[2:n-4])
-			// Unmarshal the remaining part into the Envelope struct (excluding the last 2 bytes)
 
-			// type Envelope struct {
-			// 	state         protoimpl.MessageState
-			// 	sizeCache     protoimpl.SizeCache
-			// 	unknownFields protoimpl.UnknownFields
-			// 	// A marshaled Payload
-			// 	Payload []byte `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
-			// 	// A signature by the creator specified in the Payload header
-			// 	Signature []byte `protobuf:"bytes,2,opt,name=signature,proto3" json:"signature,omitempty"`
-			// }
 			envelope := &common.Envelope{}
+
 			err = proto.Unmarshal(buffer[2:n-4], envelope)
 			if err != nil {
 				fmt.Println("Failed to unmarshal envelope:", err)
@@ -105,6 +89,7 @@ func (us *UdpServer) Start() error {
 				continue
 			}
 
+			// fail here -> msg 要包含 channelID 在裡面
 			chdr, isConfig, processor, err := us.BroadcastChannelSupport(envelope)
 			if err != nil {
 				fmt.Println("Failed to broadcast channel support:", err)

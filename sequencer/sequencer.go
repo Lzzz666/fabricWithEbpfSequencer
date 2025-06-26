@@ -32,7 +32,7 @@ func main() {
 
 	var count uint32 = 1
 
-	buffer := make([]byte, 10240)
+	buffer := make([]byte, 1024)
 
 	defer conn.Close()
 
@@ -43,7 +43,14 @@ func main() {
 			fmt.Println("Error reading from connection:", err)
 			continue
 		}
-		fmt.Printf("Received %d bytes: %s\n", n, buffer[:n])
+		fmt.Printf("Received %d bytes: %s\n", n, buffer)
+		txid, channelID, err := parseTxidAndChannel(string(buffer[:n]))
+		if err != nil {
+			fmt.Println("Error parsing txid and channel:", err)
+			continue
+		}
+		fmt.Println("txid:", txid)
+		fmt.Println("channelID:", channelID)
 		fmt.Printf("Received %d bytes: %s\n", n, buffer)
 		// Extract the extra bytes from the tail
 		if n < 2 {
@@ -95,3 +102,21 @@ func forward(tx []byte, conn *net.UDPConn) error {
 
 	return nil
 }
+
+func parseTxidAndChannel(data string) (string, string, error) {
+	// TxID 應該是 66 個十六進制字符 (32 bytes * 2)
+	const txidLength = 66
+
+	if len(data) <= txidLength {
+		return "", "", fmt.Errorf("data too short, expected at least %d characters", txidLength+1)
+	}
+
+	// 檢查前 66 個字符是否都是有效的十六進制
+	txidHex := data[:txidLength]
+	txid := txidHex
+	channelID := data[txidLength:]
+
+	return txid, channelID, nil
+}
+
+// 檢查是否為有效的十六進制字符串

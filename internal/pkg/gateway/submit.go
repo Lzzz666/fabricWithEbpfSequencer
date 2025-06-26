@@ -215,7 +215,10 @@ func (gs *Server) submitNonBFT(ctx context.Context, orderers []*orderer, txn *co
 func (gs *Server) submitNonBFTseperateTxn(ctx context.Context, orderers []*orderer, txn *common.Envelope, logger *flogging.FabricLogger, txid string, channelID string) (*gp.SubmitResponse, error) {
 
 	fmt.Println("[Debug by lz]txid", txid)
-	err := gs.broadcastByUDPwithTxID(txid)
+	// 至少還要包含 channelID 在裡面
+	// print 出 txn
+	fmt.Println("[Debug by lz]txn", txn)
+	err := gs.broadcastByUDPwithTxID(txid, channelID)
 	if err != nil {
 		return &gp.SubmitResponse{}, err
 	}
@@ -267,11 +270,13 @@ func (gs *Server) broadcastTxnToAllPeers(txn *common.Envelope, logger *flogging.
 	return nil
 }
 
-func (gs *Server) broadcastByUDPwithTxID(txid string) error {
+func (gs *Server) broadcastByUDPwithTxID(txid string, channelID string) error {
 
 	txidBytes := []byte(txid)
+	channelIDBytes := []byte(channelID)
 	seqBytes := []byte{0x00, 0x00, 0x00, 0x00} // The extra bytes you want to add
-	dataWithseqBytes := append(txidBytes, seqBytes...)
+	dataWithseqBytes := append(txidBytes, channelIDBytes...)
+	dataWithseqBytes = append(dataWithseqBytes, seqBytes...)
 	frontResver := []byte{0x00, 0x00}
 	newType := append(frontResver, dataWithseqBytes...)
 
