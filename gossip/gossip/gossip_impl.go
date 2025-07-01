@@ -65,7 +65,7 @@ type Node struct {
 	disSecAdap        *discoverySecurityAdapter
 	mcs               api.MessageCryptoService
 	stateInfoMsgStore msgstore.MessageStore
-	txnMsgStore       tnxstore.TransactionStore
+	txnMsgStore       txnstore.TransactionStore
 	certPuller        pull.Mediator
 	gossipMetrics     *metrics.GossipMetrics
 }

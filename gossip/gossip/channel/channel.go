@@ -26,7 +26,7 @@ import (
 	"github.com/hyperledger/fabric/gossip/gossip/algo"
 	"github.com/hyperledger/fabric/gossip/gossip/msgstore"
 	"github.com/hyperledger/fabric/gossip/gossip/pull"
-	"github.com/hyperledger/fabric/gossip/gossip/txn"
+	txnstore "github.com/hyperledger/fabric/gossip/gossip/txn"
 	"github.com/hyperledger/fabric/gossip/metrics"
 	"github.com/hyperledger/fabric/gossip/protoext"
 	"github.com/hyperledger/fabric/gossip/util"
@@ -152,7 +152,7 @@ type gossipChannel struct {
 	joinMsg                   api.JoinChannelMessage
 	blockMsgStore             msgstore.MessageStore
 	stateInfoMsgStore         *stateInfoCache
-	txnMsgStore               tnxstore.TransactionStore
+	txnMsgStore               txnstore.TransactionStore
 	leaderMsgStore            msgstore.MessageStore
 	chainID                   common.ChannelID
 	blocksPuller              pull.Mediator
@@ -285,9 +285,9 @@ func NewGossipChannel(pkiID common.PKIidType, org api.OrgIdentityType, mcs api.M
 
 	gc.leaderMsgStore = msgstore.NewMessageStoreExpirable(pol, msgstore.Noop, ttl, nil, nil, nil)
 
-	gc.txnMsgStore = tnxstore.NewTransactionStore(
+	gc.txnMsgStore = txnstore.NewTransactionStore(
 		protoext.NewGossipMessageComparator(0),
-		tnxstore.Noop,
+		txnstore.Noop,
 	)
 
 	gc.ConfigureChannel(joinMsg)
