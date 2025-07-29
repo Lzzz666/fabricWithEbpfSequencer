@@ -478,6 +478,7 @@ func initializeClusterClientConfig(conf *localconfig.TopLevel) (comm.ClientConfi
 	return cc, reuseGrpcListener
 }
 
+// step 1: initializeServerConfig for orderer in server.main.go
 func initializeServerConfig(conf *localconfig.TopLevel, metricsProvider metrics.Provider) comm.ServerConfig {
 	// secure server config
 	secureOpts := comm.SecureOptions{
@@ -539,7 +540,7 @@ func initializeServerConfig(conf *localconfig.TopLevel, metricsProvider metrics.
 	if metricsProvider == nil {
 		metricsProvider = &disabled.Provider{}
 	}
-
+	logger.Warningf("[Debug by lz] orderer.common.server.main.go: metricsProvider")
 	return comm.ServerConfig{
 		SecOpts:            secureOpts,
 		KaOpts:             kaOpts,

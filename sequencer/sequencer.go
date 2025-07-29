@@ -30,9 +30,9 @@ func main() {
 	}
 	defer conn.Close()
 
-	var count uint32 = 1
+	var count uint32 = 0
 
-	buffer := make([]byte, 1024)
+	buffer := make([]byte, 10240)
 
 	defer conn.Close()
 
@@ -43,20 +43,19 @@ func main() {
 			fmt.Println("Error reading from connection:", err)
 			continue
 		}
-		fmt.Printf("Received %d bytes: %s\n", n, buffer)
-		txid, channelID, err := parseTxidAndChannel(string(buffer[:n]))
-		if err != nil {
-			fmt.Println("Error parsing txid and channel:", err)
-			continue
+		fmt.Printf("[Sequencer Debug] Received %d bytes: %s\n", n, buffer[:n])
+		
+		if n > 1024 {
+			fmt.Println("[Debug by lz] Approve transaction received")
 		}
-		fmt.Println("txid:", txid)
-		fmt.Println("channelID:", channelID)
-		fmt.Printf("Received %d bytes: %s\n", n, buffer)
-		// Extract the extra bytes from the tail
+		
 		if n < 2 {
 			fmt.Println("Not enough data received")
 			continue
 		}
+		
+		// Extract the extra bytes from the tail
+
 		seqBytes := make([]byte, 4) // The extra bytes you want to add
 		binary.LittleEndian.PutUint32(seqBytes, count)
 		dataWithseqBytes := append(buffer[:n-4], seqBytes...)
@@ -69,7 +68,7 @@ func main() {
 		addrs := [9]string{"localhost", "localhost", "localhost", "localhost", "localhost", "localhost", "localhost", "localhost"}
 		for i := 8 - broadcastCount; i < 8; i++ {
 			ordererAddress := net.JoinHostPort(addrs[i], ports[i])
-			fmt.Println("broadcast to orderer address:", ordererAddress)
+			fmt.Printf("[Sequencer Debug] Broadcasting to orderer address: %s\n", ordererAddress)
 			ordererServerAddr, err := net.ResolveUDPAddr("udp", ordererAddress)
 			if err != nil {
 				fmt.Println("Error resolving address:", err)
@@ -80,13 +79,14 @@ func main() {
 			if err != nil {
 				fmt.Println("Error connecting to server:", err)
 			}
-			fmt.Println("dataWithseqBytes:", dataWithseqBytes)
+			fmt.Printf("[Sequencer Debug] Forwarding data: %x\n", dataWithseqBytes)
 			err = forward(dataWithseqBytes, ordererConn) // Use local err to avoid data race
 			if err != nil {
 				fmt.Println("Error forward to orderer:", err)
 			}
 		}
-		fmt.Println("Successful broadcast")
+		fmt.Println("[Sequencer Debug] Successful broadcast, incrementing count")
+
 		count++
 
 		// Optionally, respond to the client

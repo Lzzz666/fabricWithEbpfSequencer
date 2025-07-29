@@ -124,7 +124,10 @@ func (ef *endpointFactory) newConnection(address string, tlsRootCerts [][]byte) 
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), ef.timeout)
-	defer cancel()
+	defer func() {
+		fmt.Println("[Debug by lz] endpoint.go: cancel()")
+		cancel()
+	}()
 
 	dialer := ef.dialer
 	if dialer == nil {

@@ -160,7 +160,8 @@ func sendCreateChainTransaction(cf *ChannelCmdFactory) error {
 	if err != nil {
 		return errors.WithMessage(err, "error getting broadcast client")
 	}
-
+	logger.Warningf("[Debug by lz] sendCreateChainTransaction broadcastClient: %v", broadcastClient)
+	logger.Warningf("[Debug by lz] chCrtEnv: %v", chCrtEnv)
 	defer broadcastClient.Close()
 	err = broadcastClient.Send(chCrtEnv)
 

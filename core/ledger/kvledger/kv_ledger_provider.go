@@ -360,7 +360,7 @@ func (p *Provider) open(ledgerID string, bootSnapshotMetadata *SnapshotMetadata,
 	// Get the history database (index for history of values by key) for a chain/ledger
 	var historyDB *history.DB
 	if p.historydbProvider != nil {
-		historyDB = p.historydbProvider.GetDBHandle(ledgerID)
+		historyDB = p.historydbProvider.GetDBHandleWithTxStore(ledgerID, p.initializer.TxStoreProvider)
 	}
 
 	initializer := &lgrInitializer{
@@ -380,6 +380,7 @@ func (p *Provider) open(ledgerID string, bootSnapshotMetadata *SnapshotMetadata,
 		config:                   p.initializer.Config,
 		bootSnapshotMetadata:     bootSnapshotMetadata,
 		initializingFromSnapshot: initializingFromSnapshot,
+		txStoreProvider:          p.initializer.TxStoreProvider, // 新增：傳遞交易儲存提供者
 	}
 
 	l, err := newKVLedger(initializer)

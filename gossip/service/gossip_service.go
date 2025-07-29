@@ -29,6 +29,7 @@ import (
 	"github.com/hyperledger/fabric/gossip/election"
 	"github.com/hyperledger/fabric/gossip/filter"
 	"github.com/hyperledger/fabric/gossip/gossip"
+	txnstore "github.com/hyperledger/fabric/gossip/gossip/txn"
 	gossipmetrics "github.com/hyperledger/fabric/gossip/metrics"
 	gossipprivdata "github.com/hyperledger/fabric/gossip/privdata"
 	"github.com/hyperledger/fabric/gossip/protoext"
@@ -183,6 +184,7 @@ type GossipService struct {
 	serviceConfig     *ServiceConfig
 	privdataConfig    *gossipprivdata.PrivdataConfig
 	anchorPeerTracker *anchorPeerTracker
+	transactionStore  txnstore.TransactionStore
 }
 
 // This is an implementation of api.JoinChannelMessage.
@@ -272,6 +274,19 @@ func New(
 		anchorPeerTracker,
 	)
 
+	// 初始化 transaction store
+	messagePolicyFunc := func(this interface{}, that interface{}) common.InvalidationResult {
+		// 简单的策略：允许添加新交易，不做替换
+		return common.MessageNoAction
+	}
+
+	invalidationTrigger := func(message interface{}) {
+		// 当交易被无效化时的回调
+		logger.Debugf("Transaction invalidated: %v", message)
+	}
+
+	transactionStore := txnstore.NewTransactionStore(messagePolicyFunc, invalidationTrigger)
+
 	return &GossipService{
 		gossipSvc:       gossipComponent,
 		mcs:             mcs,
@@ -290,6 +305,7 @@ func New(
 		serviceConfig:     serviceConfig,
 		privdataConfig:    privdataConfig,
 		anchorPeerTracker: anchorPeerTracker,
+		transactionStore:  transactionStore,
 	}, nil
 }
 
@@ -319,6 +335,11 @@ func (g *GossipService) DistributePrivateData(channelID string, txID string, pri
 // NewConfigEventer creates a ConfigProcessor which the channelconfig.BundleSource can ultimately route config updates to
 func (g *GossipService) NewConfigEventer() ConfigProcessor {
 	return newConfigEventer(g)
+}
+
+// GetTransactionStore returns the transaction store instance used by this gossip service
+func (g *GossipService) GetTransactionStore() txnstore.TransactionStore {
+	return g.transactionStore
 }
 
 // Support aggregates functionality of several
@@ -366,7 +387,7 @@ func (g *GossipService) InitializeChannel(
 		Committer:          support.Committer,
 		Fetcher:            fetcher,
 		CapabilityProvider: support.CapabilityProvider,
-	}, store, selfSignedData, g.metrics.PrivdataMetrics, coordinatorConfig,
+	}, store, g.transactionStore, selfSignedData, g.metrics.PrivdataMetrics, coordinatorConfig,
 		support.IdDeserializeFactory)
 
 	var reconciler gossipprivdata.PvtDataReconciler
@@ -429,6 +450,19 @@ func (g *GossipService) InitializeChannel(
 		}
 	} else {
 		logger.Warning("Delivery client is down won't be able to pull blocks for chain", channelID)
+	}
+
+	// Set the transaction store for the gossip channel to ensure consistency
+	// between the coordinator and channel transaction stores
+	if gossipNode, ok := g.gossipSvc.(*gossip.Node); ok {
+		if gossipChannel := gossipNode.GetGossipChannelByChainID(common.ChannelID(channelID)); gossipChannel != nil {
+			gossipChannel.SetTransactionStore(g.transactionStore)
+			logger.Debugf("Set transaction store for channel %s", channelID)
+		} else {
+			logger.Warningf("Could not find gossip channel for %s", channelID)
+		}
+	} else {
+		logger.Warning("Could not cast gossip service to Node type")
 	}
 }
 

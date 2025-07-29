@@ -59,6 +59,7 @@ type Initializer struct {
 	Config                          *ledger.Config
 	HashProvider                    ledger.HashProvider
 	EbMetadataProvider              MetadataProvider
+	TxStoreProvider                 func() interface{} // 新增：交易儲存提供者
 }
 
 // NewLedgerMgr creates a new LedgerMgr
@@ -79,6 +80,7 @@ func NewLedgerMgr(initializer *Initializer) *LedgerMgr {
 			Config:                          initializer.Config,
 			CustomTxProcessors:              initializer.CustomTxProcessors,
 			HashProvider:                    initializer.HashProvider,
+			TxStoreProvider:                 initializer.TxStoreProvider, // 新增：傳遞交易儲存提供者
 		},
 	)
 	if err != nil {

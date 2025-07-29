@@ -22,6 +22,7 @@ import (
 	"github.com/hyperledger/fabric/internal/pkg/txflags"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
+	"google.golang.org/protobuf/proto"
 )
 
 var logger = flogging.MustGetLogger("validation")
@@ -37,6 +38,7 @@ type CommitBatchPreparer struct {
 	db                         *privacyenabledstate.DB
 	validator                  *validator
 	customTxProcessors         map[common.HeaderType]ledger.CustomTxProcessor
+	txStoreProvider            TransactionStoreProvider // 新增：交易儲存提供者
 }
 
 // TxStatInfo encapsulates information about a transaction
@@ -56,15 +58,17 @@ func NewCommitBatchPreparer(
 	db *privacyenabledstate.DB,
 	customTxProcessors map[common.HeaderType]ledger.CustomTxProcessor,
 	hashFunc rwsetutil.HashFunc,
+	txStoreProvider TransactionStoreProvider, // 新增：交易儲存提供者參數
 ) *CommitBatchPreparer {
 	return &CommitBatchPreparer{
-		postOrderSimulatorProvider,
-		db,
-		&validator{
+		postOrderSimulatorProvider: postOrderSimulatorProvider,
+		db:                         db,
+		validator: &validator{
 			db:       db,
 			hashFunc: hashFunc,
 		},
-		customTxProcessors,
+		customTxProcessors: customTxProcessors,
+		txStoreProvider:    txStoreProvider, // 新增：設置交易儲存提供者
 	}
 }
 
@@ -87,6 +91,7 @@ func (p *CommitBatchPreparer) ValidateAndPrepareBatch(blockAndPvtdata *ledger.Bl
 		blk,
 		doMVCCValidation,
 		p.customTxProcessors,
+		p.txStoreProvider, // 新增：傳遞交易儲存提供者
 	); err != nil {
 		return nil, nil, nil, err
 	}
@@ -187,13 +192,19 @@ func validatePvtdata(tx *transaction, pvtdata *ledger.TxPvtData) error {
 	return nil
 }
 
+// TransactionStoreProvider defines a function type for getting TransactionStore
+type TransactionStoreProvider func() interface{}
+
 // preprocessProtoBlock parses the proto instance of block into 'Block' structure.
 // The returned 'Block' structure contains only transactions that are endorser transactions and are not already marked as invalid
 func preprocessProtoBlock(postOrderSimulatorProvider PostOrderSimulatorProvider,
 	validateKVFunc func(key string, value []byte) error,
 	blk *common.Block, doMVCCValidation bool,
 	customTxProcessors map[common.HeaderType]ledger.CustomTxProcessor,
+	txStoreProvider TransactionStoreProvider, // 新增：交易儲存提供者
 ) (*block, []*TxStatInfo, error) {
+	logger.Warningf("[Debug by lz] preprocessProtoBlock with txStoreProvider support")
+
 	b := &block{num: blk.Header.Number}
 	txsStatInfo := []*TxStatInfo{}
 	// Committer validator has already set validation flags based on well formed tran checks
@@ -205,22 +216,109 @@ func preprocessProtoBlock(postOrderSimulatorProvider PostOrderSimulatorProvider,
 		var err error
 		txStatInfo := &TxStatInfo{TxType: -1}
 		txsStatInfo = append(txsStatInfo, txStatInfo)
-		if env, err = protoutil.GetEnvelopeFromBlock(envBytes); err == nil {
-			if payload, err = protoutil.UnmarshalPayload(env.Payload); err == nil {
-				chdr, err = protoutil.UnmarshalChannelHeader(payload.Header.ChannelHeader)
+
+		// 🔧 嘗試解析為完整交易 envelope
+		if env, err = protoutil.GetEnvelopeFromBlock(envBytes); err != nil {
+			// 🔧 如果失敗，假設是 txid，從外部儲存查詢
+			txid := string(envBytes)
+			logger.Debugf("[Debug by lz] Failed to parse as envelope, trying as txid: %s", txid)
+
+			if txStoreProvider != nil {
+				txStore := txStoreProvider()
+				if txStore != nil {
+					// 嘗試轉換為 TransactionStore 介面
+					if ts, ok := txStore.(interface {
+						GetByID(string) (interface{}, bool)
+					}); ok {
+						if txData, found := ts.GetByID(txid); found {
+							// 🔧 支持多種數據類型
+							var envelope *common.Envelope
+							switch data := txData.(type) {
+							case *common.Envelope:
+								envelope = data
+								logger.Debugf("[Debug by lz] Retrieved Envelope directly from store for txid: %s", txid)
+							case []byte:
+								// 嘗試解析為 envelope
+								envelope = &common.Envelope{}
+								if unmarshalErr := proto.Unmarshal(data, envelope); unmarshalErr == nil {
+									logger.Debugf("[Debug by lz] Successfully unmarshaled Envelope from bytes for txid: %s", txid)
+								} else {
+									logger.Errorf("[Debug by lz] Failed to unmarshal Envelope from bytes for txid %s: %v", txid, unmarshalErr)
+									txsFilter.SetFlag(txIndex, peer.TxValidationCode_INVALID_OTHER_REASON)
+									continue
+								}
+							default:
+								logger.Errorf("[Debug by lz] Unsupported transaction data type %T for txid: %s", txData, txid)
+								txsFilter.SetFlag(txIndex, peer.TxValidationCode_INVALID_OTHER_REASON)
+								continue
+							}
+
+							env = envelope
+							logger.Debugf("[Debug by lz] Successfully retrieved transaction from store for txid: %s", txid)
+
+							// 🔧 序列化新的 envelope 以供後續使用
+							var marshalErr error
+							envBytes, marshalErr = proto.Marshal(envelope)
+							if marshalErr != nil {
+								logger.Errorf("[Debug by lz] Failed to marshal retrieved envelope for txid %s: %v", txid, marshalErr)
+								txsFilter.SetFlag(txIndex, peer.TxValidationCode_INVALID_OTHER_REASON)
+								continue
+							}
+						} else {
+							logger.Errorf("[Debug by lz] Transaction not found in store for txid: %s", txid)
+							txsFilter.SetFlag(txIndex, peer.TxValidationCode_INVALID_OTHER_REASON)
+							continue
+						}
+					} else {
+						logger.Errorf("[Debug by lz] Transaction store does not implement GetByID method")
+						txsFilter.SetFlag(txIndex, peer.TxValidationCode_INVALID_OTHER_REASON)
+						continue
+					}
+				} else {
+					logger.Errorf("[Debug by lz] Transaction store provider returned nil")
+					txsFilter.SetFlag(txIndex, peer.TxValidationCode_INVALID_OTHER_REASON)
+					continue
+				}
+			} else {
+				logger.Errorf("[Debug by lz] No transaction store provider available, cannot resolve txid: %s", txid)
+				txsFilter.SetFlag(txIndex, peer.TxValidationCode_INVALID_OTHER_REASON)
+				continue
 			}
 		}
-		txStatInfo.TxIDFromChannelHeader = chdr.GetTxId()
+
+		// 🔧 解析 envelope 獲取 payload 和 channel header
+		if payload, err = protoutil.UnmarshalPayload(env.Payload); err == nil {
+			chdr, err = protoutil.UnmarshalChannelHeader(payload.Header.ChannelHeader)
+		}
+
+		// 🔧 安全地獲取 TxID，避免 nil pointer
+		if chdr != nil {
+			txStatInfo.TxIDFromChannelHeader = chdr.GetTxId()
+		}
+
 		if txsFilter.IsInvalid(txIndex) {
 			// Skipping invalid transaction
+			txidForLog := "unknown"
+			channelIdForLog := "unknown"
+			if chdr != nil {
+				txidForLog = chdr.GetTxId()
+				channelIdForLog = chdr.GetChannelId()
+			}
 			logger.Warningf("Channel [%s]: Block [%d] Transaction index [%d] TxId [%s]"+
 				" marked as invalid by committer. Reason code [%s]",
-				chdr.GetChannelId(), blk.Header.Number, txIndex, chdr.GetTxId(),
+				channelIdForLog, blk.Header.Number, txIndex, txidForLog,
 				txsFilter.Flag(txIndex).String())
 			continue
 		}
 		if err != nil {
 			return nil, nil, err
+		}
+
+		// 🔧 如果 chdr 為 nil，跳過這個交易
+		if chdr == nil {
+			logger.Errorf("[Debug by lz] Channel header is nil for transaction at index %d", txIndex)
+			txsFilter.SetFlag(txIndex, peer.TxValidationCode_INVALID_OTHER_REASON)
+			continue
 		}
 
 		var txRWSet *rwsetutil.TxRwSet

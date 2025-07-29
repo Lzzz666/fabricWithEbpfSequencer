@@ -454,6 +454,13 @@ func serve(args []string) error {
 			Config:                          ledgerConfig(),
 			HashProvider:                    factory.GetDefault(),
 			EbMetadataProvider:              ebMetadataProvider,
+			TxStoreProvider: func() interface{} {
+				// 延遲獲取 TransactionStore，因為 GossipService 在 LedgerMgr 之後創建
+				if peerInstance.GossipService != nil {
+					return peerInstance.GossipService.GetTransactionStore()
+				}
+				return nil
+			}, // 新增：交易儲存提供者
 		},
 	)
 

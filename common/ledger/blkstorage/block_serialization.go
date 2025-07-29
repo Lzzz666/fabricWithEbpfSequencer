@@ -33,6 +33,8 @@ func serializeBlock(block *common.Block) ([]byte, *serializedBlockInfo) {
 	buf = addHeaderBytes(block.Header, buf)
 	info.txOffsets, buf = addDataBytesAndConstructTxIndexInfo(block.Data, buf)
 	buf = addMetadataBytes(block.Metadata, buf)
+	logger.Warningf("[debug by lz] buf:%v", buf)
+	logger.Warningf("[debug by lz] info.txOffsets:%v", info.txOffsets)
 	return buf, info
 }
 
@@ -81,15 +83,28 @@ func addHeaderBytes(blockHeader *common.BlockHeader, buf []byte) []byte {
 
 func addDataBytesAndConstructTxIndexInfo(blockData *common.BlockData, buf []byte) ([]*txindexInfo, []byte) {
 	var txOffsets []*txindexInfo
+	logger.Warningf("[debug by lz] blockData.Data length: %d", len(blockData.Data))
 
 	buf = protowire.AppendVarint(buf, uint64(len(blockData.Data)))
+	// for _, tx := range blockData.Data {
+	// 	offset := len(buf)
+	// 	txid := string(tx)
+	// 	logger.Warningf("[debug by lz] Data(txid): %s", txid)
+	// 	idxInfo := &txindexInfo{txID: txid, loc: &locPointer{offset, len(buf) - offset}}
+	// 	txOffsets = append(txOffsets, idxInfo)
+	// 	buf = protowire.AppendBytes(buf, tx)
+	// }
 	for _, txEnvelopeBytes := range blockData.Data {
 		offset := len(buf)
 		txid, err := protoutil.GetOrComputeTxIDFromEnvelope(txEnvelopeBytes)
 		if err != nil {
 			logger.Warningf("error while extracting txid from tx envelope bytes during serialization of block. Ignoring this error as this is caused by a malformed transaction. Error:%s",
 				err)
+			txid = string(txEnvelopeBytes)
+			logger.Warningf("[debug by lz] err Data(txid): %s", txid)
+			logger.Warningf("[debug by lz] error fixed")
 		}
+		logger.Warningf("[debug by lz] Data(txid): %s", txid)
 		buf = protowire.AppendBytes(buf, txEnvelopeBytes)
 		idxInfo := &txindexInfo{txID: txid, loc: &locPointer{offset, len(buf) - offset}}
 		txOffsets = append(txOffsets, idxInfo)

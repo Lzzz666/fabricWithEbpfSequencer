@@ -33,6 +33,7 @@ type GossipBlockHandler struct {
 }
 
 func (h *GossipBlockHandler) HandleBlock(channelID string, block *common.Block) error {
+	logger.Warningf("[Debug by lz] GossipBlockHandler.HandleBlock")
 	if block == nil {
 		return errors.New("block from orderer could not be re-marshaled: proto: Marshal called with nil")
 	}

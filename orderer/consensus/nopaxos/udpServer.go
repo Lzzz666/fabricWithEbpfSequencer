@@ -20,7 +20,7 @@ func NewUDPServer(_host string, _port uint, _sendChan chan *message, _exitChanUD
 }
 
 func (us *UdpServer) Start() error {
-
+	logger.Warningf("[Debug by lz] Start NOPaxos udpServer")
 	addr, err := net.ResolveUDPAddr("udp", ":7073")
 	if err != nil {
 		fmt.Println("Error resolving address:", err)

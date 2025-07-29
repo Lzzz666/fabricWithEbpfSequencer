@@ -16,6 +16,7 @@ import (
 	"github.com/hyperledger/fabric/core/peer"
 	"github.com/hyperledger/fabric/core/scc"
 	gdiscovery "github.com/hyperledger/fabric/gossip/discovery"
+	txnstore "github.com/hyperledger/fabric/gossip/gossip/txn"
 	"github.com/hyperledger/fabric/gossip/service"
 	"github.com/hyperledger/fabric/internal/pkg/comm"
 	"github.com/hyperledger/fabric/internal/pkg/gateway/commit"
@@ -67,6 +68,7 @@ type Server struct {
 	getChannelConfig channelConfigGetter
 	UdpGateway       *net.UDPConn
 	gossipService    *service.GossipService
+	transactionStore txnstore.TransactionStore
 }
 
 type EndorserServerAdapter struct {
@@ -122,6 +124,9 @@ func CreateServer(
 
 	// 設置 gossipService
 	server.gossipService = peerInstance.GossipService
+
+	// 使用 gossip service 的 transactionStore，而不是創建新的
+	server.transactionStore = peerInstance.GossipService.GetTransactionStore()
 
 	peerInstance.AddConfigCallbacks(server.registry.configUpdate)
 

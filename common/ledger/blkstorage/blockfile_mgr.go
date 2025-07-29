@@ -300,6 +300,7 @@ func (mgr *blockfileMgr) addBlock(block *common.Block) error {
 	}
 	blockBytes, info := serializeBlock(block)
 	blockHash := protoutil.BlockHeaderHash(block.Header)
+	logger.Warningf("[debug by lz] blockHash: %x", blockHash)
 	// Get the location / offset where each transaction starts in the block and where the block ends
 	txOffsets := info.txOffsets
 	currentOffset := mgr.blockfilesInfo.latestFileSize
@@ -307,13 +308,14 @@ func (mgr *blockfileMgr) addBlock(block *common.Block) error {
 	blockBytesLen := len(blockBytes)
 	blockBytesEncodedLen := protowire.AppendVarint(nil, uint64(blockBytesLen))
 	totalBytesToAppend := blockBytesLen + len(blockBytesEncodedLen)
-
+	logger.Warningf("[debug by lz] totalBytesToAppend: %d", totalBytesToAppend)
 	// Determine if we need to start a new file since the size of this block
 	// exceeds the amount of space left in the current file
 	if currentOffset+totalBytesToAppend > mgr.conf.maxBlockfileSize {
 		mgr.moveToNextFile()
 		currentOffset = 0
 	}
+	logger.Warningf("[debug by lz] currentOffset: %d", currentOffset)
 	// append blockBytesEncodedLen to the file
 	err := mgr.currentFileWriter.append(blockBytesEncodedLen, false)
 	if err == nil {
@@ -328,6 +330,7 @@ func (mgr *blockfileMgr) addBlock(block *common.Block) error {
 		return errors.WithMessage(err, "error appending block to file")
 	}
 
+	logger.Warningf("[debug by lz] blockBytesLen: %d", blockBytesLen)
 	defer mgr.cache.put(block, blockBytesLen)
 
 	// Update the blockfilesInfo with the results of adding the new block
@@ -346,7 +349,7 @@ func (mgr *blockfileMgr) addBlock(block *common.Block) error {
 		}
 		return errors.WithMessage(err, "error saving blockfiles file info to db")
 	}
-
+	logger.Warningf("[debug by lz] newBlkfilesInfo: %v", newBlkfilesInfo)
 	// Index block file location pointer updated with file suffex and offset for the new block
 	blockFLP := &fileLocPointer{fileSuffixNum: newBlkfilesInfo.latestFileNumber}
 	blockFLP.offset = currentOffset
@@ -361,7 +364,7 @@ func (mgr *blockfileMgr) addBlock(block *common.Block) error {
 	}); err != nil {
 		return err
 	}
-
+	logger.Warningf("[debug by lz] newBlkfilesInfo: %v", newBlkfilesInfo)
 	// update the blockfilesInfo (for storage) and the blockchain info (for APIs) in the manager
 	mgr.updateBlockfilesInfo(newBlkfilesInfo)
 	mgr.updateBlockchainInfo(blockHash, block)

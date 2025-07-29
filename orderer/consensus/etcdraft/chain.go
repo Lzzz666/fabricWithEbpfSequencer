@@ -403,10 +403,22 @@ func (c *Chain) Order(env *common.Envelope, configSeq uint64, sequencerId uint64
 	return c.Submit(&orderer.SubmitRequest{LastValidationSeq: configSeq, Payload: env, Channel: c.channelID}, 0)
 }
 
+// OrderWithoutVerify submits normal type transactions for ordering without verification.
+func (c *Chain) OrderWithoutVerify(txid []byte, configSeq uint64, sequencerId uint64, sequencerNumber uint64) error {
+	c.Metrics.NormalProposalsReceived.Add(1)
+	return c.Submit(&orderer.SubmitRequest{LastValidationSeq: configSeq, Payload: nil, Channel: c.channelID}, 0)
+}
+
 // Configure submits config type transactions for ordering.
 func (c *Chain) Configure(env *common.Envelope, configSeq uint64) error {
 	c.Metrics.ConfigProposalsReceived.Add(1)
 	return c.Submit(&orderer.SubmitRequest{LastValidationSeq: configSeq, Payload: env, Channel: c.channelID}, 0)
+}
+
+// ConfigureWithoutVerify submits config type transactions for ordering without verification.
+func (c *Chain) ConfigureWithoutVerify(txid []byte, configSeq uint64) error {
+	c.Metrics.ConfigProposalsReceived.Add(1)
+	return c.Submit(&orderer.SubmitRequest{LastValidationSeq: configSeq, Payload: nil, Channel: c.channelID}, 0)
 }
 
 // WaitReady blocks when the chain:

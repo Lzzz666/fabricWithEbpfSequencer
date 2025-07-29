@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/hyperledger/fabric-protos-go-apiv2/common"
+	"github.com/hyperledger/fabric/orderer/common/broadcast"
 	"github.com/hyperledger/fabric/orderer/common/multichannel"
 	"google.golang.org/protobuf/proto"
 )
@@ -41,102 +42,197 @@ func (us *UdpServer) Start() error {
 		return err
 	}
 
-	buffer := make([]byte, 128)
+	buffer := make([]byte, 10240)
 	for {
 		select {
 		case <-us.exitChanUDP:
 			conn.Close()
 			return nil
 		default:
-			// Read UDP data
-			n, _, err := conn.ReadFromUDP(buffer)
-			if err != nil {
-				fmt.Println("Error reading from connection:", err)
+			if err := us.handleUDPMessage(conn, buffer); err != nil {
+				fmt.Printf("Error handling UDP message: %v\n", err)
 				continue
-			}
-
-			// Extract the extra bytes from the tail
-			if n < 2 {
-				fmt.Println("Not enough data received")
-				continue
-			}
-
-			txidBytes := buffer[2:66]
-			channelIDBytes := buffer[66 : n-4]
-			SeqNum := binary.LittleEndian.Uint32(buffer[n-4 : n]) // The last 2 bytes are the extra bytes
-			fmt.Printf("Received buffer: %x\n", buffer)
-			fmt.Printf("Received txid: %s\n", string(txidBytes))
-			fmt.Printf("Received channelID: %s\n", string(channelIDBytes))
-			fmt.Printf("Received seqBytes: %d\n", SeqNum)
-			seqBytes := buffer[n-4 : n]
-			fmt.Printf("Received extra bytes: %x\n", seqBytes)
-
-			paddedBytes := make([]byte, 8)
-			copy(paddedBytes[:8-len(seqBytes)], seqBytes)
-			var bigEndianValue uint64
-			err = binary.Read(bytes.NewReader(paddedBytes), binary.LittleEndian, &bigEndianValue)
-			if err != nil {
-				fmt.Println("Error decoding Big Endian value:", err)
-			}
-			fmt.Printf("Big Endian interpreted value (uint64): %d (0x%x)\n", bigEndianValue, bigEndianValue)
-
-			envelope := &common.Envelope{}
-
-			err = proto.Unmarshal(buffer[2:n-4], envelope)
-			if err != nil {
-				fmt.Println("Failed to unmarshal envelope:", err)
-				fmt.Println("common/server")
-				continue
-			}
-
-			// fail here -> msg 要包含 channelID 在裡面
-			chdr, isConfig, processor, err := us.BroadcastChannelSupport(envelope)
-			if err != nil {
-				fmt.Println("Failed to broadcast channel support:", err)
-				continue
-			}
-
-			if !isConfig {
-				logger.Debugf("[channel: %s] Broadcast is processing normal message from %s with txid '%s'", chdr.ChannelId, addr, chdr.TxId)
-
-				configSeq, err := processor.ProcessNormalMsg(envelope)
-				if err != nil {
-					logger.Warningf("[channel: %s] Rejecting broadcast of normal message from %s because of error: %s", chdr.ChannelId, addr, err)
-					continue
-				}
-
-				if err = processor.WaitReady(); err != nil {
-					logger.Warningf("[channel: %s] Rejecting broadcast of message from %s with SERVICE_UNAVAILABLE: rejected by Consenter: %s", chdr.ChannelId, addr, err)
-					continue
-				}
-
-				err = processor.Order(envelope, configSeq, 1, bigEndianValue)
-				if err != nil {
-					logger.Warningf("[channel: %s] Rejecting broadcast of normal message from %s with SERVICE_UNAVAILABLE: rejected by Order: %s", chdr.ChannelId, addr, err)
-					continue
-				}
-			} else { // isConfig
-				logger.Debugf("[channel: %s] Broadcast is processing config update message from %s", chdr.ChannelId, addr)
-
-				config, configSeq, err := processor.ProcessConfigUpdateMsg(envelope)
-				if err != nil {
-					logger.Warningf("[channel: %s] Rejecting broadcast of config message from %s because of error: %s", chdr.ChannelId, addr, err)
-					continue
-				}
-
-				if err = processor.WaitReady(); err != nil {
-					logger.Warningf("[channel: %s] Rejecting broadcast of message from %s with SERVICE_UNAVAILABLE: rejected by Consenter: %s", chdr.ChannelId, addr, err)
-					continue
-				}
-
-				err = processor.Configure(config, configSeq)
-				if err != nil {
-					logger.Warningf("[channel: %s] Rejecting broadcast of config message from %s with SERVICE_UNAVAILABLE: rejected by Configure: %s", chdr.ChannelId, addr, err)
-					continue
-				}
 			}
 		}
 	}
+}
+
+// handleUDPMessage processes a single UDP message
+func (us *UdpServer) handleUDPMessage(conn *net.UDPConn, buffer []byte) error {
+	n, clientAddr, err := conn.ReadFromUDP(buffer)
+	if err != nil {
+		return fmt.Errorf("error reading from connection: %w", err)
+	}
+
+	if n < 2 {
+		return fmt.Errorf("not enough data received: %d bytes", n)
+	}
+
+	// Determine message type based on size
+	if n > 1024 {
+		return us.handleApproveTransaction(buffer, n, clientAddr)
+	}
+
+	return us.handleNormalMessage(buffer, n, clientAddr)
+}
+
+// handleApproveTransaction processes approve transaction messages (> 1024 bytes)
+func (us *UdpServer) handleApproveTransaction(buffer []byte, n int, clientAddr *net.UDPAddr) error {
+	fmt.Println("[Debug by lz] Approve transaction received")
+
+	// Extract sequence bytes from the end of the message
+	seqBytes, err := us.extractSequenceBytes(buffer, n)
+	if err != nil {
+		return fmt.Errorf("failed to extract sequence bytes: %w", err)
+	}
+
+	// Unmarshal the envelope (excluding front reserve and sequence bytes)
+	envelope, err := us.unmarshalEnvelope(buffer[2 : n-4])
+	if err != nil {
+		return fmt.Errorf("failed to unmarshal envelope: %w", err)
+	}
+
+	return us.processEnvelopeMessage(envelope, seqBytes, clientAddr)
+}
+
+// handleNormalMessage processes normal messages (< 1024 bytes)
+func (us *UdpServer) handleNormalMessage(buffer []byte, n int, clientAddr *net.UDPAddr) error {
+	// Parse message components
+	txidBytes := buffer[2:66]
+	channelIDBytes := buffer[66 : n-4]
+	channelID := string(channelIDBytes)
+
+	seqBytes, err := us.extractSequenceBytes(buffer, n)
+	if err != nil {
+		return fmt.Errorf("failed to extract sequence bytes: %w", err)
+	}
+
+	us.logNormalMessageDetails(txidBytes, channelIDBytes, seqBytes, buffer)
+
+	processor := us.BroadcastChannelSupportWithoutVerify(channelID)
+
+	return us.processNormalMessage(processor, txidBytes, channelID, seqBytes, clientAddr)
+}
+
+// extractSequenceBytes extracts and converts sequence bytes to uint64
+func (us *UdpServer) extractSequenceBytes(buffer []byte, n int) (uint64, error) {
+	seqBytes := buffer[n-4 : n]
+
+	paddedBytes := make([]byte, 8)
+	copy(paddedBytes[:8-len(seqBytes)], seqBytes)
+
+	var bigEndianValue uint64
+	err := binary.Read(bytes.NewReader(paddedBytes), binary.LittleEndian, &bigEndianValue)
+	if err != nil {
+		return 0, fmt.Errorf("error decoding sequence bytes: %w", err)
+	}
+
+	fmt.Printf("Sequence value (uint64): %d (0x%x)\n", bigEndianValue, bigEndianValue)
+	return bigEndianValue, nil
+}
+
+// unmarshalEnvelope unmarshals protobuf envelope
+func (us *UdpServer) unmarshalEnvelope(data []byte) (*common.Envelope, error) {
+	envelope := &common.Envelope{}
+	err := proto.Unmarshal(data, envelope)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal envelope: %w", err)
+	}
+	return envelope, nil
+}
+
+// logNormalMessageDetails logs details of normal messages for debugging
+func (us *UdpServer) logNormalMessageDetails(txidBytes, channelIDBytes []byte, seqNum uint64, buffer []byte) {
+	fmt.Printf("Received buffer: %x\n", buffer)
+	fmt.Printf("Received txid: %s\n", string(txidBytes))
+	fmt.Printf("Received channelID: %s\n", string(channelIDBytes))
+	fmt.Printf("Received seqBytes: %d\n", seqNum)
+}
+
+// processEnvelopeMessage processes envelope-based messages (approve transactions)
+func (us *UdpServer) processEnvelopeMessage(envelope *common.Envelope, seqNum uint64, clientAddr *net.UDPAddr) error {
+	chdr, isConfig, processor, err := us.BroadcastChannelSupport(envelope)
+	if err != nil {
+		return fmt.Errorf("failed to get broadcast channel support: %w", err)
+	}
+
+	if !isConfig {
+		return us.processNormalEnvelopeMessage(chdr, processor, envelope, seqNum, clientAddr)
+	}
+
+	return us.processConfigEnvelopeMessage(chdr, processor, envelope, seqNum, clientAddr)
+}
+
+// processNormalEnvelopeMessage processes normal envelope messages
+func (us *UdpServer) processNormalEnvelopeMessage(chdr *common.ChannelHeader, processor broadcast.ChannelSupport, envelope *common.Envelope, seqNum uint64, clientAddr *net.UDPAddr) error {
+	logger.Debugf("[channel: %s] Broadcast is processing normal message from %s with txid '%s'", chdr.ChannelId, clientAddr, chdr.TxId)
+
+	configSeq, err := processor.ProcessNormalMsg(envelope)
+	if err != nil {
+		logger.Warningf("[channel: %s] Rejecting broadcast of normal message from %s because of error: %s", chdr.ChannelId, clientAddr, err)
+		return err
+	}
+
+	if err = processor.WaitReady(); err != nil {
+		logger.Warningf("[channel: %s] Rejecting broadcast of message from %s with SERVICE_UNAVAILABLE: rejected by Consenter: %s", chdr.ChannelId, clientAddr, err)
+		return err
+	}
+
+	err = processor.Order(envelope, configSeq, 1, seqNum)
+	if err != nil {
+		logger.Warningf("[channel: %s] Rejecting broadcast of normal message from %s with SERVICE_UNAVAILABLE: rejected by Order: %s", chdr.ChannelId, clientAddr, err)
+		return err
+	}
+
+	return nil
+}
+
+// processConfigEnvelopeMessage processes config envelope messages
+func (us *UdpServer) processConfigEnvelopeMessage(chdr *common.ChannelHeader, processor broadcast.ChannelSupport, envelope *common.Envelope, seqNum uint64, clientAddr *net.UDPAddr) error {
+	logger.Debugf("[channel: %s] Broadcast is processing config update message from %s", chdr.ChannelId, clientAddr)
+
+	config, configSeq, err := processor.ProcessConfigUpdateMsg(envelope)
+	if err != nil {
+		logger.Warningf("[channel: %s] Rejecting broadcast of config message from %s because of error: %s", chdr.ChannelId, clientAddr, err)
+		return err
+	}
+
+	if err = processor.WaitReady(); err != nil {
+		logger.Warningf("[channel: %s] Rejecting broadcast of message from %s with SERVICE_UNAVAILABLE: rejected by Consenter: %s", chdr.ChannelId, clientAddr, err)
+		return err
+	}
+
+	err = processor.Configure(config, configSeq)
+	if err != nil {
+		logger.Warningf("[channel: %s] Rejecting broadcast of config message from %s with SERVICE_UNAVAILABLE: rejected by Configure: %s", chdr.ChannelId, clientAddr, err)
+		return err
+	}
+
+	return nil
+}
+
+// processNormalMessage processes normal messages without envelope
+func (us *UdpServer) processNormalMessage(processor *multichannel.ChainSupport, txidBytes []byte, channelID string, seqNum uint64, clientAddr *net.UDPAddr) error {
+	logger.Debugf("[channel: %s] Broadcast is processing normal message from %s with txid '%s'", channelID, clientAddr, string(txidBytes))
+
+	configSeq, err := processor.ProcessNormalMsgWithoutVerify()
+	if err != nil {
+		logger.Warningf("[channel: %s] Rejecting broadcast of message from %s with SERVICE_UNAVAILABLE: rejected by ProcessNormalMsgWithoutVerify: %s", channelID, clientAddr, err)
+		return err
+	}
+
+	if err = processor.WaitReady(); err != nil {
+		logger.Warningf("[channel: %s] Rejecting broadcast of message from %s with SERVICE_UNAVAILABLE: rejected by Consenter: %s", channelID, clientAddr, err)
+		return err
+	}
+
+	err = processor.OrderWithoutVerify(txidBytes, configSeq, 1, seqNum)
+	if err != nil {
+		logger.Warningf("[channel: %s] Rejecting broadcast of normal message from %s with SERVICE_UNAVAILABLE: rejected by Order: %s", channelID, clientAddr, err)
+		return err
+	}
+
+	return nil
 }
 
 func (s *UdpServer) Close() {

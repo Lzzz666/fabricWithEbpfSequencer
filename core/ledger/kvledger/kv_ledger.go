@@ -69,6 +69,7 @@ type kvLedger struct {
 	commitHash      []byte
 	hashProvider    ledger.HashProvider
 	config          *ledger.Config
+	txStoreProvider validation.TransactionStoreProvider // 新增：交易儲存提供者
 
 	// isPvtstoreAheadOfBlkstore is read during missing pvtData
 	// reconciliation and may be updated during a regular block commit.
@@ -96,6 +97,7 @@ type lgrInitializer struct {
 	customTxProcessors       map[common.HeaderType]ledger.CustomTxProcessor
 	hashProvider             ledger.HashProvider
 	config                   *ledger.Config
+	txStoreProvider          validation.TransactionStoreProvider // 新增：交易儲存提供者
 }
 
 func newKVLedger(initializer *lgrInitializer) (*kvLedger, error) {
@@ -109,6 +111,7 @@ func newKVLedger(initializer *lgrInitializer) (*kvLedger, error) {
 		historyDB:            initializer.historyDB,
 		hashProvider:         initializer.hashProvider,
 		config:               initializer.config,
+		txStoreProvider:      initializer.txStoreProvider, // 新增：設置交易儲存提供者
 		blockAPIsRWLock:      &sync.RWMutex{},
 	}
 
@@ -134,6 +137,7 @@ func newKVLedger(initializer *lgrInitializer) (*kvLedger, error) {
 		CCInfoProvider:      initializer.ccInfoProvider,
 		CustomTxProcessors:  initializer.customTxProcessors,
 		HashFunc:            rwsetHashFunc,
+		TxStoreProvider:     initializer.txStoreProvider, // 新增：傳遞交易儲存提供者
 	}
 	if err := l.initTxMgr(txmgrInitializer); err != nil {
 		return nil, err
@@ -773,6 +777,7 @@ func (l *kvLedger) commitToPvtAndBlockStore(
 		logger.Debugf("Skipping writing pvtData to pvt block store as it ahead of the block store")
 	}
 
+	logger.Warningf("[debug by lz] AddBlock in kvledger")
 	if err := l.blockStore.AddBlock(blockAndPvtdata.Block); err != nil {
 		return err
 	}

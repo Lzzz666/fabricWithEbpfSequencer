@@ -43,6 +43,7 @@ func newBlockStore(id string, conf *Conf, indexConfig *IndexConfig,
 // AddBlock adds a new block
 func (store *BlockStore) AddBlock(block *common.Block) error {
 	// track elapsed time to collect block commit time
+	logger.Warningf("[debug by lz] AddBlock")
 	startBlockCommit := time.Now()
 	result := store.fileMgr.addBlock(block)
 	elapsedBlockCommit := time.Since(startBlockCommit)

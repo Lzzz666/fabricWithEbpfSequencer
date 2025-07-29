@@ -30,13 +30,16 @@ type chain struct {
 	consenters    []*etcdraft.Consenter
 	NopaxosServer *Server
 	Count         uint64
-	batch         []*cb.Envelope
+	batch         [][]byte // 統一存儲序列化的 envelope bytes
 }
 
 type message struct {
-	configSeq uint64
-	normalMsg *cb.Envelope
-	configMsg *cb.Envelope
+	configSeq       uint64
+	normalMsg       *cb.Envelope
+	configMsg       *cb.Envelope
+	txid            []byte // 用來儲存 txid
+	channelID       []byte // 用來儲存 channelID
+	hasFullEnvelope bool   // 新增：標記是否有完整的 envelope
 }
 
 // New creates a new consenter for the solo consensus scheme.
@@ -102,7 +105,7 @@ func newChain(support consensus.ConsenterSupport, consenters []*etcdraft.Consent
 			deliverChan,
 		),
 		Count: 1,
-		batch: make([]*cb.Envelope, 0),
+		batch: make([][]byte, 0),
 	}
 }
 
@@ -119,9 +122,49 @@ func (ch *chain) Halt() {
 	}
 }
 
+// TODO: 確認是否需要實作，會不會是因為這個沒有處理造成 approve 有時候會失敗
 func (ch *chain) WaitReady() error {
 	return nil
 }
+
+// Order accepts normal messages for ordering
+// func (ch *chain) Order(env *cb.Envelope, configSeq uint64, sequencerId uint64, sequencerNumber uint64) error {
+// 	logger.Warningf("[Debug by lz] NOPaxos Order started - sequencerId: %d, sequencerNumber: %d, configSeq: %d", sequencerId, sequencerNumber, configSeq)
+
+// 	// 從 envelope 中提取 payload
+// 	logger.Warningf("[Debug by lz] Unmarshaling envelope payload")
+// 	payload, err := protoutil.UnmarshalPayload(env.Payload)
+// 	if err != nil {
+// 		logger.Warningf("[Debug by lz] Error unmarshaling payload: %v", err)
+// 		return err
+// 	}
+
+// 	// 從 payload header 中提取 channel header
+// 	logger.Warningf("[Debug by lz] Unmarshaling channel header")
+// 	chdr, err := protoutil.UnmarshalChannelHeader(payload.Header.ChannelHeader)
+// 	if err != nil {
+// 		logger.Warningf("[Debug by lz] Error unmarshaling channel header: %v", err)
+// 		return err
+// 	}
+
+// 	// 提取 txid
+// 	txid := chdr.TxId
+// 	channelID := chdr.ChannelId
+
+// 	logger.Warningf("[Debug by lz] Transaction details - TxID: %s, ChannelID: %s", txid, channelID)
+// 	logger.Warningf("[Debug by lz] Converting to txid bytes and calling OrderWithoutVerify")
+
+// 	// 將 txid 轉換為 bytes 並調用 OrderWithoutVerify
+// 	return ch.OrderWithoutVerify([]byte(txid), configSeq, sequencerId, sequencerNumber)
+// }
+
+// Configure accepts configuration update messages for ordering
+// func (ch *chain) Configure(config *cb.Envelope, configSeq uint64) error {
+// 	logger.Warningf("[Debug by lz] NOPaxos Configure started - configSeq: %d", configSeq)
+// 	logger.Warningf("[Debug by lz] Delegating to ConfigureWithoutVerify")
+// 	// 可以簡單地委派給 WithoutVerify 版本
+// 	return ch.ConfigureWithoutVerify(nil, configSeq)
+// }
 
 // Order accepts normal messages for ordering
 func (ch *chain) Order(env *cb.Envelope, configSeq uint64, sequencerId uint64, sequencerNumber uint64) error {
@@ -157,11 +200,56 @@ func (ch *chain) Order(env *cb.Envelope, configSeq uint64, sequencerId uint64, s
 
 	select {
 	case ch.sendChan <- &message{
-		configSeq: configSeq,
-		normalMsg: env,
+		configSeq:       configSeq,
+		normalMsg:       env,
+		hasFullEnvelope: true,
 	}:
 		return nil
 	case <-ch.exitChan:
+		return fmt.Errorf("Exiting")
+	}
+}
+
+// 改成只對 txid 做 ordering
+func (ch *chain) OrderWithoutVerify(txid []byte, configSeq uint64, sequencerId uint64, sequencerNumber uint64) error {
+	logger.Warningf("[Debug by lz] OrderWithoutVerify started - txid: %s, sequencerNumber: %d", string(txid), sequencerNumber)
+
+	dropRate := float64(ch.Count) / float64(sequencerNumber+1)
+	logger.Warningf("[Debug by lz] Message statistics - Count: %d, SequencerNumber: %d, Drop Rate: %f", ch.Count, sequencerNumber, dropRate)
+
+	logger.Warningf("[Debug by lz] Creating NOPaxos command request")
+	ch.NopaxosServer.nopaxos.Command(
+		&protocol.NewCommandRequest{
+			CommandRequest: &protocol.CommandRequest{
+				SessionNum: 1,
+				MessageNum: protocol.MessageID(sequencerNumber),
+				Timestamp:  time.Now(),
+				Value:      txid,
+			},
+			ConfigSeq: configSeq,
+		},
+		nil,
+	)
+	logger.Warningf("[Debug by lz] Command sent to NOPaxos protocol")
+
+	ch.Count = ch.Count + 1
+
+	if !ch.NopaxosServer.nopaxos.IsLeader() {
+		logger.Warningf("[Debug by lz] Not leader, returning without sending to main loop")
+		return nil
+	}
+
+	logger.Warningf("[Debug by lz] Is leader, sending message to main loop channel")
+	select {
+	case ch.sendChan <- &message{
+		configSeq:       configSeq,
+		txid:            txid,
+		hasFullEnvelope: false,
+	}:
+		logger.Warningf("[Debug by lz] Message sent to main loop successfully")
+		return nil
+	case <-ch.exitChan:
+		logger.Warningf("[Debug by lz] Exit signal received, stopping")
 		return fmt.Errorf("Exiting")
 	}
 }
@@ -179,6 +267,22 @@ func (ch *chain) Configure(config *cb.Envelope, configSeq uint64) error {
 	}
 }
 
+func (ch *chain) ConfigureWithoutVerify(txid []byte, configSeq uint64) error {
+	logger.Warningf("[Debug by lz] ConfigureWithoutVerify started - configSeq: %d", configSeq)
+	logger.Warningf("[Debug by lz] Sending config message to main loop")
+	select {
+	case ch.sendChan <- &message{
+		configSeq: configSeq,
+		txid:      txid,
+	}:
+		logger.Warningf("[Debug by lz] Config message sent to main loop successfully")
+		return nil
+	case <-ch.exitChan:
+		logger.Warningf("[Debug by lz] Exit signal received during config")
+		return fmt.Errorf("Exiting")
+	}
+}
+
 // Errored only closes on exit
 func (ch *chain) Errored() <-chan struct{} {
 	return ch.exitChan
@@ -192,49 +296,66 @@ func (ch *chain) main() {
 	defer ch.NopaxosServer.Stop()
 
 	for {
+		logger.Warningf("[Debug by lz] NOPaxos main loop iteration - waiting for messages")
 		seq := ch.support.Sequence()
 		err = nil
 		select {
 		case msg := <-ch.sendChan:
-			if msg.configMsg == nil {
-				// NormalMsg
+			logger.Warningf("[Debug by lz] Received message in main loop - configSeq: %d, current seq: %d", msg.configSeq, seq)
+			// 如果 msg 有 txid，則是 normalMsg
+			if msg.txid != nil {
+				logger.Warningf("[Debug by lz] Processing normal transaction message")
+				// TxnMsg
 				if msg.configSeq < seq {
-					_, err = ch.support.ProcessNormalMsg(msg.normalMsg)
+					logger.Warningf("[Debug by lz] ConfigSeq (%d) < current seq (%d), calling ProcessNormalMsgWithoutVerify", msg.configSeq, seq)
+					_, err = ch.support.ProcessNormalMsgWithoutVerify()
 					if err != nil {
+						logger.Warningf("[Debug by lz] ProcessNormalMsgWithoutVerify failed: %s", err)
 						logger.Warningf("Discarding bad normal message: %s", err)
 						continue
 					}
+					logger.Warningf("[Debug by lz] ProcessNormalMsgWithoutVerify succeeded")
 				}
 
-				ch.batch = append(ch.batch, msg.normalMsg)
+				logger.Warningf("[Debug by lz] Adding txid to batch - current batch size: %d", len(ch.batch))
+				ch.batch = append(ch.batch, msg.txid)
 
 				if len(ch.batch) > 512 {
-					block := ch.support.CreateNextBlock(ch.batch)
+					logger.Warningf("[Debug by lz] Batch size exceeded 512 (%d), creating block", len(ch.batch))
+					block := ch.support.CreateNextBlockWithoutVerify(ch.batch)
 					ch.support.WriteBlock(block, nil)
-					ch.batch = []*cb.Envelope{}
+					logger.Warningf("[Debug by lz] Block written successfully, clearing batch")
+					ch.batch = [][]byte{}
 					if timer != nil {
 						timer = nil
 					}
 				}
 
 				pending := len(ch.batch) > 0
+				logger.Warningf("[Debug by lz] Checking timer state - pending: %v, timer running: %v", pending, timer != nil)
 
 				switch {
 				case timer != nil && !pending:
 					// Timer is already running but there are no messages pending, stop the timer
+					logger.Warningf("[Debug by lz] Stopping timer - no pending messages")
 					timer = nil
 				case timer == nil && pending:
 					// Timer is not already running and there are messages pending, so start it
+					logger.Warningf("[Debug by lz] Starting 250ms batch timer - %d messages pending", len(ch.batch))
 					timer = time.After(250 * time.Millisecond)
 					logger.Debugf("Just began %s batch timer", ch.support.SharedConfig().BatchTimeout().String())
 				default:
 					// Do nothing when:
 					// 1. Timer is already running and there are messages pending
 					// 2. Timer is not set and there are no messages pending
+					logger.Warningf("[Debug by lz] No timer action needed")
 				}
-			} else {
+			} else if msg.configMsg != nil {
 				// ConfigMsg
+				// 目的是為了確保 config 的 seq 不會超過目前的 seq
+				logger.Warningf("[Debug by lz] Processing config message")
 				if msg.configSeq < seq {
+					// 不處理 config 的 msg
 					msg.configMsg, _, err = ch.support.ProcessConfigMsg(msg.configMsg)
 					if err != nil {
 						logger.Warningf("Discarding bad config message: %s", err)
@@ -250,22 +371,70 @@ func (ch *chain) main() {
 				block := ch.support.CreateNextBlock([]*cb.Envelope{msg.configMsg})
 				ch.support.WriteConfigBlock(block, nil)
 				timer = nil
+			} else if msg.hasFullEnvelope {
+				logger.Warningf("[Debug by lz] Processing normal transaction message")
+				msgBytes, err := proto.Marshal(msg.normalMsg)
+				if err != nil {
+					logger.Warningf("[Debug by lz] Failed to marshal envelope: %v", err)
+					continue
+				}
+
+				logger.Warningf("[Debug by lz] Adding envelope to batch - current batch size: %d", len(ch.batch))
+				ch.batch = append(ch.batch, msgBytes)
+
+				if len(ch.batch) > 512 {
+					logger.Warningf("[Debug by lz] Batch size exceeded 512 (%d), creating block", len(ch.batch))
+					block := ch.support.CreateNextBlockWithoutVerify(ch.batch)
+					ch.support.WriteBlock(block, nil)
+					logger.Warningf("[Debug by lz] Block written successfully, clearing batch")
+					ch.batch = [][]byte{}
+					if timer != nil {
+						timer = nil
+					}
+				}
+
+				pending := len(ch.batch) > 0
+				logger.Warningf("[Debug by lz] Checking timer state - pending: %v, timer running: %v", pending, timer != nil)
+
+				switch {
+				case timer != nil && !pending:
+					// Timer is already running but there are no messages pending, stop the timer
+					logger.Warningf("[Debug by lz] Stopping timer - no pending messages")
+					timer = nil
+				case timer == nil && pending:
+					// Timer is not already running and there are messages pending, so start it
+					logger.Warningf("[Debug by lz] Starting 250ms batch timer - %d messages pending", len(ch.batch))
+					timer = time.After(250 * time.Millisecond)
+					logger.Debugf("Just began %s batch timer", ch.support.SharedConfig().BatchTimeout().String())
+				default:
+					// Do nothing when:
+					// 1. Timer is already running and there are messages pending
+					// 2. Timer is not set and there are no messages pending
+					logger.Warningf("[Debug by lz] No timer action needed")
+				}
+			} else {
+				logger.Warningf("[Debug by lz] Received unknown message type")
+				continue
 			}
 		case <-timer:
 			//clear the timer
+			// Timer timeout：代表需要基於目前 batch 切 block
+			logger.Warningf("[Debug by lz] Batch timer expired - processing pending transactions")
 			timer = nil
 
 			if len(ch.batch) == 0 {
+				logger.Warningf("[Debug by lz] Timer expired but no pending transactions - possible bug")
 				logger.Warningf("Batch timer expired with no pending requests, this might indicate a bug")
 				continue
 			}
-			logger.Debugf("Batch timer expired, creating block")
-			block := ch.support.CreateNextBlock(ch.batch)
+			logger.Warningf("[Debug by lz] Creating block from %d pending transactions", len(ch.batch))
+			block := ch.support.CreateNextBlockWithoutVerify(ch.batch)
 			ch.support.WriteBlock(block, nil)
-			ch.batch = []*cb.Envelope{}
+			logger.Warningf("[Debug by lz] Block created and written successfully, clearing batch")
+			ch.batch = [][]byte{}
 
 		case <-ch.exitChan:
-			logger.Debugf("Exiting")
+			logger.Warningf("[Debug by lz] Exit signal received, shutting down NOPaxos main loop")
 			return
 		}
 	}

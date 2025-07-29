@@ -39,6 +39,7 @@ type Initializer struct {
 	Config                          *Config
 	CustomTxProcessors              map[common.HeaderType]CustomTxProcessor
 	HashProvider                    HashProvider
+	TxStoreProvider                 func() interface{} // 新增：交易儲存提供者
 }
 
 // Config is a structure used to configure a ledger provider.

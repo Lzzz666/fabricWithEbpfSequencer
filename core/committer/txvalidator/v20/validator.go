@@ -197,12 +197,16 @@ func (v *TxValidator) Validate(block *common.Block) error {
 
 			go func(index int, data []byte) {
 				defer v.Semaphore.Release()
-
-				v.validateTx(&blockValidationRequest{
-					d:     data,
-					block: block,
-					tIdx:  index,
-				}, results)
+				// 不驗證 tx
+				// v.validateTx(&blockValidationRequest{
+				// 	d:     data,
+				// 	block: block,
+				// 	tIdx:  index,
+				// }, results)
+				results <- &blockValidationResult{
+					tIdx:           index,
+					validationCode: peer.TxValidationCode_VALID,
+				}
 			}(tIdx, d)
 		}
 	}()
@@ -306,6 +310,8 @@ func (v *TxValidator) validateTx(req *blockValidationRequest, results chan<- *bl
 		}
 		return
 	}
+	// TODO: debug this
+	logger.Warningf("[Debug by lz] d: %v", d)
 
 	if env, err := protoutil.GetEnvelopeFromBlock(d); err != nil {
 		logger.Warningf("Error getting tx from block: %+v", err)

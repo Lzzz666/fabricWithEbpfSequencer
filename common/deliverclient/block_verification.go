@@ -249,11 +249,12 @@ func (a *BlockVerificationAssistant) VerifyBlock(block *common.Block) error {
 		return err
 	}
 
-	dataHash, err := protoutil.BlockDataHash(block.Data)
-	if err != nil {
-		return errors.Wrapf(err, "failed to verify transactions are well formed for block with id [%d] on channel [%s]", block.Header.Number, a.channelID)
-	}
-
+	dataHash := protoutil.BlockDataHashWithoutVerify(block.Data)
+	// dataHash := protoutil.BlockDataHash(block.Data)
+	// if err != nil {
+	// 	return errors.Wrapf(err, "failed to verify transactions are well formed for block with id [%d] on channel [%s]", block.Header.Number, a.channelID)
+	// }
+	// TODO: compute dataHash from block.Data by myself
 	// Verify that Header.DataHash is equal to the hash of block.Data
 	// This is to ensure that the header is consistent with the data carried by this block
 	if !bytes.Equal(dataHash, block.Header.DataHash) {
@@ -261,7 +262,7 @@ func (a *BlockVerificationAssistant) VerifyBlock(block *common.Block) error {
 			block.Header.Number, a.channelID, hex.EncodeToString(block.Header.DataHash), hex.EncodeToString(dataHash))
 	}
 
-	err = a.sigVerifierFunc(block.Header, block.Metadata)
+	err := a.sigVerifierFunc(block.Header, block.Metadata)
 	if err != nil {
 		return err
 	}

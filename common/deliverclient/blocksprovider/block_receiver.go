@@ -105,6 +105,7 @@ RecvLoop: // Loop until the endpoint is refreshed, or there is an error on the c
 			}
 			var blockNum uint64
 			var channelConfig *common.Config
+			br.logger.Warningf("[Debug by lz] response: %v", response)
 			blockNum, channelConfig, err = br.processMsg(response)
 			if err != nil {
 				br.logger.Warningf("Got error while attempting to receive blocks: %v", err)
@@ -127,6 +128,7 @@ RecvLoop: // Loop until the endpoint is refreshed, or there is an error on the c
 }
 
 func (br *BlockReceiver) processMsg(msg *orderer.DeliverResponse) (uint64, *common.Config, error) {
+	br.logger.Warningf("[Debug by lz] processMsg")
 	switch t := msg.GetType().(type) {
 	case *orderer.DeliverResponse_Status:
 		if t.Status == common.Status_SUCCESS {
@@ -136,7 +138,7 @@ func (br *BlockReceiver) processMsg(msg *orderer.DeliverResponse) (uint64, *comm
 		return 0, nil, errors.Errorf("received bad status %v from orderer", t.Status)
 	case *orderer.DeliverResponse_Block:
 		blockNum := t.Block.Header.Number
-
+		br.logger.Warningf("[Debug by lz] want to ignore verify block")
 		if err := br.updatableBlockVerifier.VerifyBlock(t.Block); err != nil {
 			return 0, nil, errors.WithMessagef(err, "block [%d] from orderer [%s] could not be verified", blockNum, br.endpoint.String())
 		}

@@ -72,6 +72,9 @@ func BlockDataHash(b *cb.BlockData) ([]byte, error) {
 	}
 	return ComputeBlockDataHash(b), nil
 }
+func BlockDataHashWithoutVerify(b *cb.BlockData) []byte {
+	return ComputeBlockDataHash(b)
+}
 
 func ComputeBlockDataHash(b *cb.BlockData) []byte {
 	sum := sha256.Sum256(bytes.Join(b.Data, nil))

@@ -7,8 +7,10 @@ SPDX-License-Identifier: Apache-2.0
 package privdata
 
 import (
+	"strings"
 	"time"
 
+	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric-protos-go-apiv2/common"
 	"github.com/hyperledger/fabric-protos-go-apiv2/ledger/rwset"
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
@@ -20,6 +22,7 @@ import (
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/rwsetutil"
 	"github.com/hyperledger/fabric/core/transientstore"
+	txnstore "github.com/hyperledger/fabric/gossip/gossip/txn"
 	"github.com/hyperledger/fabric/gossip/metrics"
 	privdatacommon "github.com/hyperledger/fabric/gossip/privdata/common"
 	"github.com/hyperledger/fabric/gossip/util"
@@ -123,6 +126,7 @@ type coordinator struct {
 	selfSignedData protoutil.SignedData
 	Support
 	store                          *transientstore.Store
+	txnStore                       txnstore.TransactionStore
 	transientBlockRetention        uint64
 	logger                         util.Logger
 	metrics                        *metrics.PrivdataMetrics
@@ -132,12 +136,13 @@ type coordinator struct {
 }
 
 // NewCoordinator creates a new instance of coordinator
-func NewCoordinator(mspID string, support Support, store *transientstore.Store, selfSignedData protoutil.SignedData, metrics *metrics.PrivdataMetrics,
+func NewCoordinator(mspID string, support Support, store *transientstore.Store, txnStore txnstore.TransactionStore, selfSignedData protoutil.SignedData, metrics *metrics.PrivdataMetrics,
 	config CoordinatorConfig, idDeserializerFactory IdentityDeserializerFactory) Coordinator {
 	return &coordinator{
 		Support:                        support,
 		mspID:                          mspID,
 		store:                          store,
+		txnStore:                       txnStore,
 		selfSignedData:                 selfSignedData,
 		transientBlockRetention:        config.TransientBlockRetention,
 		logger:                         logger.With("channel", support.ChainID),
@@ -161,6 +166,10 @@ func (c *coordinator) StoreBlock(block *common.Block, privateDataSets util.PvtDa
 
 	c.logger.Debugf("Validating block [%d]", block.Header.Number)
 
+	c.logger.Warningf("[Debug by lz] block: %v", block)
+	// TODO: 組合 不完整的 block 和 完整的 block 的資料
+	// 先 get peer 有的 private data
+
 	validationStart := time.Now()
 	err := c.Validator.Validate(block)
 	c.reportValidationDuration(time.Since(validationStart))
@@ -168,7 +177,7 @@ func (c *coordinator) StoreBlock(block *common.Block, privateDataSets util.PvtDa
 		c.logger.Errorf("Validation failed: %+v", err)
 		return err
 	}
-
+	// 在這裡要取得 txnstore 中的完整交易
 	blockAndPvtData := &ledger.BlockAndPvtData{
 		Block:          block,
 		PvtData:        make(ledger.TxPvtDataMap),
@@ -205,6 +214,8 @@ func (c *coordinator) StoreBlock(block *common.Block, privateDataSets util.PvtDa
 		fetcher:                                 c.Fetcher,
 		idDeserializerFactory:                   c.idDeserializerFactory,
 	}
+	// 這裡是取得 block 中 要寫入 private data 的 transaction 的資訊
+	// 如何這裡的 block 解開是只有 txid 的話，那麼就從 transaction store 中取得完整的交易並處理 （已完成）
 	pvtdataToRetrieve, err := c.getTxPvtdataInfoFromBlock(block)
 	if err != nil {
 		c.logger.Warningf("Failed to get private data info from block: %s", err)
@@ -221,9 +232,13 @@ func (c *coordinator) StoreBlock(block *common.Block, privateDataSets util.PvtDa
 
 	blockAndPvtData.PvtData = retrievedPvtdata.blockPvtdata.PvtData
 	blockAndPvtData.MissingPvtData = retrievedPvtdata.blockPvtdata.MissingPvtData
+	logger.Warningf("[Debug by lz] blockAndPvtData.PvtData in StoreBlock: %v", blockAndPvtData.PvtData)
+	logger.Warningf("[Debug by lz] blockAndPvtData.MissingPvtData in StoreBlock: %v", blockAndPvtData.MissingPvtData)
 
+	logger.Warningf("[Debug by lz] blockAndPvtData in StoreBlock: %v", blockAndPvtData)
 	// commit block and private data
 	commitStart := time.Now()
+	// here is the commit, and we have error here
 	err = c.CommitLegacy(blockAndPvtData, &ledger.CommitOptions{})
 	c.reportCommitDuration(time.Since(commitStart))
 	if err != nil {
@@ -292,6 +307,7 @@ func (c *coordinator) GetPvtDataAndBlockByNum(seqNum uint64, peerAuthInfo protou
 // getTxPvtdataInfoFromBlock parses the block transactions and returns the list of private data items in the block.
 // Note that this peer's eligibility for the private data is not checked here.
 func (c *coordinator) getTxPvtdataInfoFromBlock(block *common.Block) ([]*ledger.TxPvtdataInfo, error) {
+	c.logger.Warningf("[Debug by lz] getTxPvtdataInfoFromBlock")
 	txPvtdataItemsFromBlock := []*ledger.TxPvtdataInfo{}
 
 	if block.Metadata == nil || len(block.Metadata.Metadata) <= int(common.BlockMetadataIndex_TRANSACTIONS_FILTER) {
@@ -299,17 +315,22 @@ func (c *coordinator) getTxPvtdataInfoFromBlock(block *common.Block) ([]*ledger.
 	}
 	txsFilter := txValidationFlags(block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER])
 	data := block.Data.Data
+	c.logger.Warningf("[Debug by lz]  getTxPvtdataInfoFromBlock: data: %v", data)
 	if len(txsFilter) != len(block.Data.Data) {
 		return nil, errors.Errorf("block data size(%d) is different from Tx filter size(%d)", len(block.Data.Data), len(txsFilter))
 	}
 
 	for seqInBlock, txEnvBytes := range data {
 		invalid := txsFilter[seqInBlock] != uint8(peer.TxValidationCode_VALID)
-		txInfo, err := getTxInfoFromTransactionBytes(txEnvBytes)
+		txInfo, err := c.getTxInfoFromTransactionBytes(txEnvBytes)
 		if err != nil {
 			continue
 		}
-
+		// 照理來說這裡應該已經要是從 txnstore 中取得的完整交易 （txInfo）
+		logger.Warningf("[Debug by lz] txInfo in getTxPvtdataInfoFromBlock: %v", txInfo)
+		logger.Warningf("[Debug by lz] txInfo.txRWSet in getTxPvtdataInfoFromBlock: %v", txInfo.txRWSet)
+		logger.Warningf("[Debug by lz] txInfo.txRWSet.NsRwSets in getTxPvtdataInfoFromBlock: %v", txInfo.txRWSet.NsRwSets)
+		logger.Warningf("[Debug by lz] txInfo.txid in getTxPvtdataInfoFromBlock: %v", txInfo.txID)
 		colPvtdataInfo := []*ledger.CollectionPvtdataInfo{}
 		for _, ns := range txInfo.txRWSet.NsRwSets {
 			for _, hashedCollection := range ns.CollHashedRwSets {
@@ -407,14 +428,104 @@ type txInfo struct {
 }
 
 // getTxInfoFromTransactionBytes parses a transaction and returns info required for private data retrieval
-func getTxInfoFromTransactionBytes(envBytes []byte) (*txInfo, error) {
+// 這裡主要是處理 Ｂlock 進來後 要寫入 private data 的 transaction 的資訊
+func (c *coordinator) getTxInfoFromTransactionBytes(envBytes []byte) (*txInfo, error) {
 	txInfo := &txInfo{}
+	logger.Warningf("[Debug by lz] getTxInfoFromTransactionBytes: envBytes: %v", envBytes)
+
+	// 如果這個是完整的交易，那麼我們需要從 envBytes 中解析出 envelope
 	env, err := protoutil.GetEnvelopeFromBlock(envBytes)
+	// 如果這不是完整的交易，那就是從 orderer 來的 txid 而已
 	if err != nil {
 		logger.Warningf("Invalid envelope: %s", err)
+		logger.Warningf("[Debug by lz] Invalid envelope, so it's a txid")
+		// 如果這個是只有 txid，那麼我們需要從 transaction store 中取得完整的交易
+		txID := string(envBytes)
+		logger.Warningf("[Debug by lz] getTxInfoFromTransactionBytes txID: %s", txID)
+		logger.Warningf("[Debug by lz] getTxInfoFromTransactionBytes txID hex: %x", envBytes)
+		logger.Warningf("[Debug by lz] getTxInfoFromTransactionBytes txID length: %d", len(txID))
+
+		// 從 transaction store 中根據 txID 獲取完整的交易
+		if c.txnStore != nil {
+			logger.Warningf("[Debug by lz] Mempool transactions: %v", c.txnStore.Get())
+			logger.Warningf("[Debug by lz] Transaction store size: %d", c.txnStore.Size())
+
+			// 嘗試多種可能的 txID 格式
+			var fullTxnData interface{}
+			var found bool
+
+			// 1. 嘗試原始字符串格式
+			fullTxnData, found = c.txnStore.GetByID(txID)
+			if found {
+				logger.Warningf("[Debug by lz] Found transaction using original txID: %s", txID)
+			} else {
+				logger.Warningf("[Debug by lz] Not found using original txID: %s", txID)
+
+				// 2. 嘗試去除可能的空字節或特殊字符
+				cleanTxID := strings.TrimSpace(strings.Trim(txID, "\x00"))
+				if cleanTxID != txID {
+					logger.Warningf("[Debug by lz] Trying cleaned txID: %s", cleanTxID)
+					fullTxnData, found = c.txnStore.GetByID(cleanTxID)
+					if found {
+						logger.Warningf("[Debug by lz] Found transaction using cleaned txID: %s", cleanTxID)
+						txID = cleanTxID // 更新 txID
+					}
+				}
+
+				// 3. 如果還是沒找到，列出 store 中的所有 txID 進行比較
+				if !found {
+					logger.Warningf("[Debug by lz] Still not found. Listing all transactions in store:")
+					allTxns := c.txnStore.Get()
+					for i, txn := range allTxns {
+						logger.Warningf("[Debug by lz] Store txn[%d]: %T", i, txn)
+					}
+				}
+			}
+
+			if found {
+				logger.Warningf("[Debug by lz] fullTxnData: %T", fullTxnData)
+				logger.Warningf("[Debug by lz] Found full transaction in store for txID: %s", txID)
+				// 嘗試從完整交易數據中解析
+				if txnBytes, ok := fullTxnData.([]byte); ok {
+					// 直接將字節數據反序列化為 Envelope，而不是遞歸調用
+					var envelope common.Envelope
+					if err := proto.Unmarshal(txnBytes, &envelope); err != nil {
+						logger.Warningf("[Debug by lz] Failed to unmarshal transaction envelope: %v", err)
+					} else {
+						logger.Warningf("[Debug by lz] Successfully unmarshaled envelope from transaction store")
+						// 直接使用反序列化的 envelope 繼續處理，並更新 envBytes
+						env = &envelope
+						envBytes = txnBytes  // 重要：更新 envBytes 為完整的交易字節數據
+						goto processEnvelope // 跳轉到處理 envelope 的代碼
+					}
+				} else if envelope, ok := fullTxnData.(*common.Envelope); ok {
+					// 處理當 transaction store 直接返回 *common.Envelope 的情況
+					logger.Warningf("[Debug by lz] Found envelope directly in transaction store")
+					env = envelope
+					// 需要將 envelope 序列化為 bytes 以供後續使用
+					if envBytes, err = proto.Marshal(envelope); err != nil {
+						logger.Warningf("[Debug by lz] Failed to marshal envelope to bytes: %v", err)
+					} else {
+						logger.Warningf("[Debug by lz] Successfully marshaled envelope to bytes")
+						goto processEnvelope
+					}
+				} else {
+					logger.Warningf("[Debug by lz] Transaction data is not []byte or *common.Envelope type: %T", fullTxnData)
+				}
+			} else {
+				logger.Warningf("[Debug by lz] Transaction not found in store for txID: %s", txID)
+			}
+		} else {
+			logger.Warningf("[Debug by lz] Transaction store is nil")
+		}
+
+		// 如果無法從 transaction store 獲取，設置基本信息並返回錯誤
+		txInfo.txID = txID
 		return nil, err
 	}
 
+processEnvelope:
+	// Unmarshal the payload
 	payload, err := protoutil.UnmarshalPayload(env.Payload)
 	if err != nil {
 		logger.Warningf("Invalid payload: %s", err)
@@ -425,7 +536,7 @@ func getTxInfoFromTransactionBytes(envBytes []byte) (*txInfo, error) {
 		logger.Warningf("Invalid tx: %s", err)
 		return nil, err
 	}
-
+	// 取得 channelID 和 txID
 	chdr, err := protoutil.UnmarshalChannelHeader(payload.Header.ChannelHeader)
 	if err != nil {
 		logger.Warningf("Invalid channel header: %s", err)
@@ -434,41 +545,48 @@ func getTxInfoFromTransactionBytes(envBytes []byte) (*txInfo, error) {
 	txInfo.channelID = chdr.ChannelId
 	txInfo.txID = chdr.TxId
 
+	// 如果不是 ENDORSER_TRANSACTION，就不是你想處理的那類交易，回傳錯誤
 	if chdr.Type != int32(common.HeaderType_ENDORSER_TRANSACTION) {
 		err := errors.New("header type is not an endorser transaction")
 		logger.Debugf("Invalid transaction type: %s", err)
 		return nil, err
 	}
 
+	// 抽出交易細節（Action, Endorsements, RWSet）
 	respPayload, err := protoutil.GetActionFromEnvelope(envBytes)
 	if err != nil {
 		logger.Warningf("Failed obtaining action from envelope: %s", err)
 		return nil, err
 	}
 
+	// 取得交易
 	tx, err := protoutil.UnmarshalTransaction(payload.Data)
 	if err != nil {
 		logger.Warningf("Invalid transaction in payload data for tx [%s]: %s", chdr.TxId, err)
 		return nil, err
 	}
 
+	// 取得 action
 	ccActionPayload, err := protoutil.UnmarshalChaincodeActionPayload(tx.Actions[0].Payload)
 	if err != nil {
 		logger.Warningf("Invalid chaincode action in payload for tx [%s]: %s", chdr.TxId, err)
 		return nil, err
 	}
 
+	// 取得 action 的 endorsements
 	if ccActionPayload.Action == nil {
 		logger.Warningf("Action in ChaincodeActionPayload for tx [%s] is nil", chdr.TxId)
 		return nil, err
 	}
 	txInfo.endorsements = ccActionPayload.Action.Endorsements
 
+	// 從交易中解析出 Chaincode 執行後對帳本造成的變更（Read/Write Set，簡稱 RWSet），並把它存進 txInfo.txRWSet
 	txRWSet := &rwsetutil.TxRwSet{}
 	if err = txRWSet.FromProtoBytes(respPayload.Results); err != nil {
 		logger.Warningf("Failed obtaining TxRwSet from ChaincodeAction's results: %s", err)
 		return nil, err
 	}
+
 	txInfo.txRWSet = txRWSet
 
 	return txInfo, nil

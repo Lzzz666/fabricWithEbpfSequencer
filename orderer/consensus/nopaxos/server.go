@@ -52,6 +52,7 @@ type Server struct {
 
 // Start starts the NOPaxos server
 func (s *Server) Start() error {
+	logger.Warningf("[Debug by lz] Start NOPaxos server")
 	s.mu.Lock()
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.port))
@@ -90,6 +91,7 @@ func (s *Server) timeout() {
 
 // Stop shuts down the NOPaxos server
 func (s *Server) Stop() error {
+	logger.Warningf("[Debug by lz] Stop NOPaxos server")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.server != nil {

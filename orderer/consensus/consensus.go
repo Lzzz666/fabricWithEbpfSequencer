@@ -61,6 +61,11 @@ type Chain interface {
 	// The consenter may return an error, indicating the message was not accepted
 	Order(env *cb.Envelope, configSeq uint64, sequencerId uint64, sequencerNumber uint64) error
 
+	// OrderWithoutVerify accepts a txid which has been processed at a given configSeq.
+	// If the configSeq advances, it is the responsibility of the consenter
+	// to revalidate and potentially discard the message
+	// The consenter may return an error, indicating the message was not accepted
+	OrderWithoutVerify(txid []byte, configSeq uint64, sequencerId uint64, sequencerNumber uint64) error
 	// Configure accepts a message which reconfigures the channel and will
 	// trigger an update to the configSeq if committed.  The configuration must have
 	// been triggered by a ConfigUpdate message. If the config sequence advances,
@@ -69,6 +74,11 @@ type Chain interface {
 	// The consenter may return an error, indicating the message was not accepted
 	Configure(config *cb.Envelope, configSeq uint64) error
 
+	// ConfigureWithoutVerify accepts a txid which has been processed at a given configSeq.
+	// If the configSeq advances, it is the responsibility of the consenter
+	// to revalidate and potentially discard the message
+	// The consenter may return an error, indicating the message was not accepted
+	ConfigureWithoutVerify(txid []byte, configSeq uint64) error
 	// WaitReady blocks waiting for consenter to be ready for accepting new messages.
 	// This is useful when consenter needs to temporarily block ingress messages so
 	// that in-flight messages can be consumed. It could return error if consenter is
@@ -112,6 +122,10 @@ type ConsenterSupport interface {
 	// CreateNextBlock takes a list of messages and creates the next block based on the block with highest block number committed to the ledger
 	// Note that either WriteBlock or WriteConfigBlock must be called before invoking this method a second time.
 	CreateNextBlock(messages []*cb.Envelope) *cb.Block
+
+	// CreateNextBlockWithoutVerify takes a list of messages and creates the next block based on the block with highest block number committed to the ledger
+	// Note that either WriteBlock or WriteConfigBlock must be called before invoking this method a second time.
+	CreateNextBlockWithoutVerify(messages [][]byte) *cb.Block
 
 	// Block returns a block with the given number,
 	// or nil if such a block doesn't exist.

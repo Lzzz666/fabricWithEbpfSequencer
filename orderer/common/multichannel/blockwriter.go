@@ -9,6 +9,7 @@ package multichannel
 import (
 	"sync"
 
+	"github.com/golang/protobuf/proto"
 	cb "github.com/hyperledger/fabric-protos-go-apiv2/common"
 	newchannelconfig "github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/common/configtx"
@@ -16,7 +17,6 @@ import (
 	"github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/internal/pkg/identity"
 	"github.com/hyperledger/fabric/protoutil"
-	"google.golang.org/protobuf/proto"
 )
 
 type blockWriterSupport interface {
@@ -77,6 +77,21 @@ func (bw *BlockWriter) CreateNextBlock(messages []*cb.Envelope) *cb.Block {
 			logger.Panicf("Could not marshal envelope: %s", err)
 		}
 	}
+
+	block := protoutil.NewBlock(bw.lastBlock.Header.Number+1, previousBlockHash)
+	block.Header.DataHash = protoutil.ComputeBlockDataHash(data)
+	block.Data = data
+
+	return block
+}
+func (bw *BlockWriter) CreateNextBlockWithoutVerify(messages [][]byte) *cb.Block {
+	previousBlockHash := protoutil.BlockHeaderHash(bw.lastBlock.Header)
+
+	data := &cb.BlockData{
+		Data: make([][]byte, len(messages)),
+	}
+
+	copy(data.Data, messages)
 
 	block := protoutil.NewBlock(bw.lastBlock.Header.Number+1, previousBlockHash)
 	block.Header.DataHash = protoutil.ComputeBlockDataHash(data)
@@ -167,6 +182,7 @@ func (bw *BlockWriter) WriteBlock(block *cb.Block, encodedMetadataValue []byte) 
 	go func() {
 		defer bw.committingBlock.Unlock()
 		bw.commitBlock(encodedMetadataValue)
+		logger.Warningf("[debug by lz] WriteBlock")
 	}()
 }
 
@@ -186,6 +202,7 @@ func (bw *BlockWriter) WriteBlockSync(block *cb.Block, encodedMetadataValue []by
 
 	defer bw.committingBlock.Unlock()
 	bw.commitBlock(encodedMetadataValue)
+	logger.Warningf("[debug by lz] WriteBlockSync")
 }
 
 // commitBlock should only ever be invoked with the bw.committingBlock held
@@ -196,7 +213,7 @@ func (bw *BlockWriter) commitBlock(encodedMetadataValue []byte) {
 	if len(bw.lastBlock.Metadata.Metadata[cb.BlockMetadataIndex_SIGNATURES]) == 0 {
 		bw.addBlockSignature(bw.lastBlock, encodedMetadataValue)
 	}
-
+	logger.Warningf("[debug by lz] commitBlock")
 	err := bw.support.Append(bw.lastBlock)
 	if err != nil {
 		logger.Panicf("[channel: %s] Could not append block: %s", bw.support.ChannelID(), err)

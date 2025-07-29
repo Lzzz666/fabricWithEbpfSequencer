@@ -37,7 +37,7 @@ const (
 )
 
 // CreateTxnMsg creates a gossip message specifically for transactions
-func CreateTxnMsg(channelID string, payloadBytes []byte) *gproto.GossipMessage {
+func CreateTxnMsg(channelID string, wholeTxnBytes []byte) *gproto.GossipMessage {
 	return &gproto.GossipMessage{
 		Channel: []byte(channelID),
 		Tag:     gproto.GossipMessage_CHAN_AND_ORG,
@@ -45,7 +45,7 @@ func CreateTxnMsg(channelID string, payloadBytes []byte) *gproto.GossipMessage {
 		Content: &gproto.GossipMessage_DataMsg{
 			DataMsg: &gproto.DataMessage{
 				Payload: &gproto.Payload{
-					Data:   payloadBytes,
+					Data:   wholeTxnBytes,
 					SeqNum: TXN_MSG_MARKER, // Use special marker to identify as transaction
 				},
 			},
@@ -215,9 +215,8 @@ func (gs *Server) submitNonBFT(ctx context.Context, orderers []*orderer, txn *co
 func (gs *Server) submitNonBFTseperateTxn(ctx context.Context, orderers []*orderer, txn *common.Envelope, logger *flogging.FabricLogger, txid string, channelID string) (*gp.SubmitResponse, error) {
 
 	fmt.Println("[Debug by lz]txid", txid)
-	// 至少還要包含 channelID 在裡面
-	// print 出 txn
 	fmt.Println("[Debug by lz]txn", txn)
+	// 目前為止都還是完整的 txn 有包含 readSet 和 writeSet
 	err := gs.broadcastByUDPwithTxID(txid, channelID)
 	if err != nil {
 		return &gp.SubmitResponse{}, err
@@ -246,16 +245,22 @@ func (gs *Server) broadcastTxnToAllPeers(txn *common.Envelope, logger *flogging.
 	}
 
 	// 2. 將 Envelope 序列化為 bytes
-	payloadBytes, err := proto.Marshal(txn)
+	wholeTxnBytes, err := proto.Marshal(txn)
 	if err != nil {
 		return fmt.Errorf("failed to marshal transaction envelope: %v", err)
 	}
-	fmt.Printf("[Debug by lz] Transaction payload size: %d bytes\n", len(payloadBytes))
-	fmt.Printf("[Debug by lz] Transaction payload hex: %x\n", payloadBytes)
+	fmt.Printf("[Debug by lz] Transaction payload size: %d bytes\n", len(wholeTxnBytes))
+	fmt.Printf("[Debug by lz] Transaction payload hex: %x\n", wholeTxnBytes)
 
 	// 3. 建立 gossip transaction message
-	gossipMsg := CreateTxnMsg(channelID, payloadBytes)
+	gossipMsg := CreateTxnMsg(channelID, wholeTxnBytes)
 
+	//print txid
+	txid, err := protoutil.GetOrComputeTxIDFromEnvelope(wholeTxnBytes)
+	if err != nil {
+		return fmt.Errorf("failed to get txid from transaction envelope: %v", err)
+	}
+	fmt.Printf("[Debug by lz] txid: %v\n", txid)
 	fmt.Printf("[Debug by lz] Created gossip message for channel: %s\n", channelID)
 	fmt.Printf("[Debug by lz] Message details:\n")
 	fmt.Printf("  - Channel: %s\n", string(gossipMsg.Channel))
@@ -263,9 +268,16 @@ func (gs *Server) broadcastTxnToAllPeers(txn *common.Envelope, logger *flogging.
 	fmt.Printf("  - Payload size: %d\n", len(gossipMsg.GetDataMsg().Payload.Data))
 	fmt.Printf("  - SeqNum (Transaction marker): %d\n", gossipMsg.GetDataMsg().Payload.SeqNum)
 
-	// 4. 使用 gossip 發送
+	// 4. 在發送給其他 peers 之前，先將交易存儲到本地的 mempool 中
+	err = gs.storeTransactionLocally(txn, channelID, txid)
+	if err != nil {
+		fmt.Printf("[Debug by lz] Warning: Failed to store transaction locally: %v\n", err)
+		// 繼續執行，不讓本地存儲失敗影響到 gossip 傳播
+	}
+
+	// 5. 使用 gossip 發送
 	gs.gossipService.Gossip(gossipMsg)
-	fmt.Printf("[Debug by lz] Gossip message sent to peers\n")
+	fmt.Printf("[Debug by lz] Gossip message sent to peers (including self)\n")
 
 	return nil
 }
@@ -374,4 +386,29 @@ func prepareTransaction(header *common.Header, payload *peer.ChaincodeProposalPa
 	}
 
 	return &common.Envelope{Payload: paylBytes}, nil
+}
+
+// storeTransactionLocally 將交易存儲到本地的 TransactionStore 中
+func (gs *Server) storeTransactionLocally(txn *common.Envelope, channelID string, txid string) error {
+	if gs.transactionStore == nil {
+		return fmt.Errorf("transaction store not initialized")
+	}
+
+	// 將交易序列化為字節數組用於存儲
+	txnBytes, err := proto.Marshal(txn)
+	if err != nil {
+		return fmt.Errorf("failed to marshal transaction: %v", err)
+	}
+
+	// 使用 TransactionStore 的 Add 方法存儲交易
+	// 這裡理論上也是完整的 txn 有包含 readSet 和 writeSet
+	success := gs.transactionStore.Add(txid, txnBytes)
+	if !success {
+		fmt.Printf("[Debug by lz] Transaction %s already exists in store or was invalidated\n", txid)
+		return nil // 不算錯誤，可能是重複交易
+	}
+	
+	logger.Warningf("[Debug by lz] GetTransactionStore in gateway: %v", gs.transactionStore.Get())
+	fmt.Printf("[Debug by lz] Successfully stored transaction %s in local mempool for channel %s\n", txid, channelID)
+	return nil
 }

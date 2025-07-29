@@ -112,6 +112,7 @@ func (fl *FileLedger) Height() uint64 {
 
 // Append a new block to the ledger
 func (fl *FileLedger) Append(block *cb.Block) error {
+	logger.Warningf("[debug by lz] ddBlock in fileledger")
 	err := fl.blockStore.AddBlock(block)
 	if err == nil {
 		close(fl.signal)

@@ -89,6 +89,7 @@ type Initializer struct {
 	CCInfoProvider      ledger.DeployedChaincodeInfoProvider
 	CustomTxProcessors  map[common.HeaderType]ledger.CustomTxProcessor
 	HashFunc            rwsetutil.HashFunc
+	TxStoreProvider     validation.TransactionStoreProvider // 新增：交易儲存提供者
 }
 
 // NewLockBasedTxMgr constructs a new instance of NewLockBasedTxMgr
@@ -120,7 +121,8 @@ func NewLockBasedTxMgr(initializer *Initializer) (*LockBasedTxMgr, error) {
 		txmgr,
 		initializer.DB,
 		initializer.CustomTxProcessors,
-		initializer.HashFunc)
+		initializer.HashFunc,
+		initializer.TxStoreProvider) // 新增：傳遞交易儲存提供者
 	return txmgr, nil
 }
 

@@ -25,7 +25,7 @@ import (
 	"github.com/hyperledger/fabric/gossip/gossip/channel"
 	"github.com/hyperledger/fabric/gossip/gossip/msgstore"
 	"github.com/hyperledger/fabric/gossip/gossip/pull"
-	"github.com/hyperledger/fabric/gossip/gossip/txn"
+	txnstore "github.com/hyperledger/fabric/gossip/gossip/txn"
 	"github.com/hyperledger/fabric/gossip/identity"
 	"github.com/hyperledger/fabric/gossip/metrics"
 	"github.com/hyperledger/fabric/gossip/protoext"
@@ -795,6 +795,11 @@ func (g *Node) UpdateChaincodes(chaincodes []*pg.Chaincode, channelID common.Cha
 		return
 	}
 	gc.UpdateChaincodes(chaincodes)
+}
+
+// GetGossipChannelByChainID returns the gossip channel for the given channel ID
+func (g *Node) GetGossipChannelByChainID(channelID common.ChannelID) channel.GossipChannel {
+	return g.chanState.getGossipChannelByChainID(channelID)
 }
 
 // Accept returns a dedicated read-only channel for messages sent by other nodes that match a certain predicate.

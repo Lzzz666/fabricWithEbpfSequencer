@@ -71,6 +71,7 @@ func (rs *responseSender) SendBlockResponse(
 	chain deliver.Chain,
 	signedData *protoutil.SignedData,
 ) error {
+	logger.Warningf("[Debug by lz] responseSender.SendBlockResponse")
 	response := &ab.DeliverResponse{
 		Type: &ab.DeliverResponse_Block{Block: block},
 	}
@@ -145,6 +146,7 @@ type broadcastMsgTracer struct {
 
 func (bmt *broadcastMsgTracer) Recv() (*cb.Envelope, error) {
 	msg, err := bmt.AtomicBroadcast_BroadcastServer.Recv()
+	logger.Warningf("[Debug by lz] server.go: msg: %v", msg)
 	if traceDir := bmt.debug.BroadcastTraceDir; traceDir != "" {
 		bmt.trace(bmt.debug.BroadcastTraceDir, msg, err)
 	}
@@ -167,6 +169,7 @@ func (dmt *deliverMsgTracer) Recv() (*cb.Envelope, error) {
 // Broadcast receives a stream of messages from a client for ordering
 func (s *server) Broadcast(srv ab.AtomicBroadcast_BroadcastServer) error {
 	logger.Debugf("Starting new Broadcast handler")
+	logger.Warningf("[Debug by lz] Starting new Broadcast handler")
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Criticalf("Broadcast client triggered panic: %s\n%s", r, debug.Stack())
@@ -185,6 +188,7 @@ func (s *server) Broadcast(srv ab.AtomicBroadcast_BroadcastServer) error {
 // Deliver sends a stream of blocks to a client after ordering
 func (s *server) Deliver(srv ab.AtomicBroadcast_DeliverServer) error {
 	logger.Debugf("Starting new Deliver handler")
+	logger.Warningf("[Debug by lz] Starting new Deliver handler")
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Criticalf("Deliver client triggered panic: %s\n%s", r, debug.Stack())

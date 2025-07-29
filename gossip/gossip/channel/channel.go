@@ -93,6 +93,9 @@ type GossipChannel interface {
 	// that are eligible to be in the channel
 	ConfigureChannel(joinMsg api.JoinChannelMessage)
 
+	// SetTransactionStore sets the transaction store for this channel
+	SetTransactionStore(store txnstore.TransactionStore)
+
 	// LeaveChannel makes the peer leave the channel
 	LeaveChannel()
 
@@ -285,10 +288,7 @@ func NewGossipChannel(pkiID common.PKIidType, org api.OrgIdentityType, mcs api.M
 
 	gc.leaderMsgStore = msgstore.NewMessageStoreExpirable(pol, msgstore.Noop, ttl, nil, nil, nil)
 
-	gc.txnMsgStore = txnstore.NewTransactionStore(
-		protoext.NewGossipMessageComparator(0),
-		txnstore.Noop,
-	)
+	// 不在这里创建 txnMsgStore，将在 ConfigureChannel 中设置
 
 	gc.ConfigureChannel(joinMsg)
 
@@ -604,6 +604,13 @@ func (gc *gossipChannel) ConfigureChannel(joinMsg api.JoinChannelMessage) {
 	gc.stateInfoMsgStore.validate(joinMsg.Members())
 }
 
+// SetTransactionStore sets the transaction store for this channel
+func (gc *gossipChannel) SetTransactionStore(store txnstore.TransactionStore) {
+	gc.Lock()
+	defer gc.Unlock()
+	gc.txnMsgStore = store
+}
+
 // HandleMessage processes a message sent by a remote peer
 // 這裡會收到其他節點的 gossip message (目前只有 stateInfo 和 block)
 func (gc *gossipChannel) HandleMessage(msg protoext.ReceivedMessage) {
@@ -612,6 +619,7 @@ func (gc *gossipChannel) HandleMessage(msg protoext.ReceivedMessage) {
 		return
 	}
 	m := msg.GetGossipMessage()
+	gc.logger.Warningf("[Debug by lz] =================================")
 	gc.logger.Warningf("[Debug by lz] peer Received message: %v", m.GossipMessage)
 	// 判斷是否 message 是 dataMsg 或 stateInfoMsg
 	gc.logger.Warningf("[Debug by lz] protoext.IsDataMsg(m.GossipMessage): %v", protoext.IsDataMsg(m.GossipMessage))
@@ -790,10 +798,6 @@ func (gc *gossipChannel) handleTxnMessage(m *proto.GossipMessage, sender common.
 		return
 	}
 
-	gc.logger.Infof("[TxnMsg] Processing transaction from %v", sender)
-	gc.logger.Infof("[TxnMsg] Transaction payload size: %d bytes", len(payload.Data))
-	gc.logger.Infof("[TxnMsg] Transaction hex: %x", payload.Data)
-
 	// Verify transaction envelope
 	txnEnvelope, err := protoutil.UnmarshalEnvelope(payload.Data)
 	if err != nil {
@@ -801,21 +805,54 @@ func (gc *gossipChannel) handleTxnMessage(m *proto.GossipMessage, sender common.
 		return
 	}
 
-	gc.logger.Infof("[TxnMsg] Successfully processed transaction from %v", sender)
-	gc.logger.Infof("[TxnMsg] Transaction envelope payload size: %d bytes", len(txnEnvelope.Payload))
+	// 先解出 txid - 使用正確的參數：整個 Envelope 的序列化字節
+	txid, err := protoutil.GetOrComputeTxIDFromEnvelope(payload.Data)
+	if err != nil {
+		gc.logger.Warningf("[TxnMsg] Failed to get txid from envelope from %v: %+v", sender, err)
+		return
+	}
+
+	// 從 Envelope.Payload 中提取 txid 來驗證一致性
+	txidFromPayload := ""
+	if txnPayload, err := protoutil.UnmarshalPayload(txnEnvelope.Payload); err == nil {
+		if txnPayload.Header != nil {
+			if chdr, err := protoutil.UnmarshalChannelHeader(txnPayload.Header.ChannelHeader); err == nil {
+				if chdr.TxId != "" {
+					txidFromPayload = chdr.TxId
+				} else {
+					// 如果 ChannelHeader 中没有 TxId，尝试从 SignatureHeader 计算
+					if sighdr, err := protoutil.UnmarshalSignatureHeader(txnPayload.Header.SignatureHeader); err == nil {
+						txidFromPayload = protoutil.ComputeTxID(sighdr.Nonce, sighdr.Creator)
+					}
+				}
+			}
+		}
+	}
+
+	gc.logger.Infof("[TxnMsg] txid from envelope: %v", txid)
+	gc.logger.Infof("[TxnMsg] txid from payload: %v", txidFromPayload)
+	gc.logger.Infof("[TxnMsg] txids match: %v", txid == txidFromPayload)
 
 	// 將 transaction 加入到 mempool 中
 	// 參考 block 的
-	gc.txnMsgStore.Add(txnEnvelope.Payload)
+	// 這裡是收到 gossip 的 txn 要存到 mempool 中
+	// 所以當收到 block 的時候 我們要存的是 txid 和 整個 txn 的 envelope
+	if gc.txnMsgStore == nil {
+		gc.logger.Warning("[TxnMsg] Transaction store not initialized yet, ignoring transaction")
+		return
+	}
+
+	addResult := gc.txnMsgStore.Add(txid, txnEnvelope)
+	gc.logger.Infof("[TxnMsg] Transaction add result: %v", addResult)
 	gc.logger.Infof("[TxnMsg] Transaction added to mempool")
 	gc.logger.Infof("[TxnMsg] Mempool size: %d", gc.txnMsgStore.Size())
 	gc.logger.Infof("[TxnMsg] Mempool transactions: %v", gc.txnMsgStore.Get())
-	// 之後就是要把 mempool 的 transaction 拿出來並且正確變回原來的 transaction 格式 並且塞進 block 中
 
-	if err != nil {
-		gc.logger.Warningf("[TxnMsg] Failed to unmarshal transaction from %v: %+v", sender, err)
-		return
-	}
+	gc.logger.Infof("[TxnMsg] txid: %v", txid)
+	gc.logger.Infof("[TxnMsg] Mempool contains transaction: %v", gc.txnMsgStore.Contains(txid))
+	// TODO: 之後就是要把 mempool 的 transaction 拿出來並且正確變回原來的 transaction 格式 並且塞進 block 中
+	// 現在 peer 裡面已經有 txns 了，所以我要處理的是 sequencer 的 txid 塞入 orderer 要處理 並且 避開驗證然後打包成 block 最後送到 peer 中
+
 }
 
 func (gc *gossipChannel) handleStateInfSnapshot(m *proto.GossipMessage, sender common.PKIidType) {
@@ -868,6 +905,7 @@ func (gc *gossipChannel) handleStateInfSnapshot(m *proto.GossipMessage, sender c
 }
 
 func (gc *gossipChannel) verifyBlock(msg *proto.GossipMessage, sender common.PKIidType) bool {
+	gc.logger.Warningf("[Debug by lz] verifyBlock in gossipChannel")
 	if !protoext.IsDataMsg(msg) {
 		gc.logger.Warning("Received from ", sender, "a DataUpdate message that contains a non-block GossipMessage:", msg)
 		return false
@@ -916,6 +954,10 @@ func (gc *gossipChannel) verifyBlock(msg *proto.GossipMessage, sender common.PKI
 	gc.logger.Warningf("  - Block number: %d", block.Header.Number)
 	gc.logger.Warningf("  - Previous hash: %x", block.Header.PreviousHash)
 	gc.logger.Warningf("  - Data hash: %x", block.Header.DataHash)
+
+	gc.logger.Warningf("[Debug by lz] msg: %v", msg)
+	gc.logger.Warningf("[Debug by lz] seqNum: %d", seqNum)
+	gc.logger.Warningf("[Debug by lz] block: %v", block)
 
 	err = gc.mcs.VerifyBlock(msg.Channel, seqNum, block)
 	if err != nil {

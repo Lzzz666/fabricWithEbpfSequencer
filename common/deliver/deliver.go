@@ -198,6 +198,7 @@ func isFiltered(srv *Server) bool {
 }
 
 func (h *Handler) deliverBlocks(ctx context.Context, srv *Server, envelope *cb.Envelope) (status cb.Status, err error) {
+	logger.Warningf("[Debug by lz] deliverBlocks")
 	addr := util.ExtractRemoteAddress(ctx)
 	payload, chdr, shdr, err := h.parseEnvelope(ctx, envelope)
 	if err != nil {
@@ -339,7 +340,7 @@ func (h *Handler) deliverBlocks(ctx context.Context, srv *Server, envelope *cb.E
 				Metadata: block.Metadata,
 			}
 		}
-
+		logger.Warningf("[Debug by lz] block2send: %v", block2send)
 		signedData := &protoutil.SignedData{Data: envelope.Payload, Identity: shdr.Creator, Signature: envelope.Signature}
 		if err := srv.SendBlockResponse(block2send, chdr.ChannelId, chain, signedData); err != nil {
 			logger.Warningf("[channel: %s] Error sending to %s: %s", chdr.ChannelId, addr, err)

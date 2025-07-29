@@ -48,6 +48,8 @@ type Consenter interface {
 	// It ultimately passes through to the consensus.Chain interface
 	Configure(config *cb.Envelope, configSeq uint64) error
 
+	ConfigureWithoutVerify(txid []byte, configSeq uint64) error
+
 	// WaitReady blocks waiting for consenter to be ready for accepting new messages.
 	// This is useful when consenter needs to temporarily block ingress messages so
 	// that in-flight messages can be consumed. It could return error if consenter is
@@ -66,27 +68,35 @@ type Handler struct {
 func (bh *Handler) Handle(srv ab.AtomicBroadcast_BroadcastServer) error {
 	addr := util.ExtractRemoteAddress(srv.Context())
 	logger.Debugf("Starting new broadcast loop for %s", addr)
+	logger.Warningf("[Debug by lz] Handle started - waiting for messages from client %s", addr)
 	for {
+		logger.Warningf("[Debug by lz] Waiting to receive message from client %s", addr)
 		msg, err := srv.Recv()
 		if errors.Is(err, io.EOF) {
 			logger.Debugf("Received EOF from %s, hangup", addr)
+			logger.Warningf("[Debug by lz] Client %s disconnected (EOF)", addr)
 			return nil
 		}
 		if err != nil {
+			logger.Warningf("[Debug by lz] Error reading from %s: %s", addr, err)
 			logger.Warningf("Error reading from %s: %s", addr, err)
 			return err
 		}
-
+		logger.Warningf("[Debug by lz] Message received from %s, calling ProcessMessage", addr)
 		resp := bh.ProcessMessage(msg, addr)
+		logger.Warningf("[Debug by lz] ProcessMessage completed, sending response with status: %s", resp.Status.String())
 		err = srv.Send(resp)
 		if resp.Status != cb.Status_SUCCESS {
+			logger.Warningf("[Debug by lz] Response status not SUCCESS, returning error: %s", resp.Status.String())
 			return err
 		}
 
 		if err != nil {
 			logger.Warningf("Error sending to %s: %s", addr, err)
+			logger.Warningf("[Debug by lz] Error sending response to %s: %s", addr, err)
 			return err
 		}
+		logger.Warningf("[Debug by lz] Response sent successfully to %s", addr)
 	}
 }
 
@@ -133,6 +143,7 @@ func (mt *MetricsTracker) BeginEnqueue() {
 
 // ProcessMessage validates and enqueues a single message
 func (bh *Handler) ProcessMessage(msg *cb.Envelope, addr string) (resp *ab.BroadcastResponse) {
+	logger.Warningf("[Debug by lz] ProcessMessage started - validating and processing message from %s", addr)
 	tracker := &MetricsTracker{
 		ChannelID: "unknown",
 		TxType:    "unknown",
@@ -143,61 +154,83 @@ func (bh *Handler) ProcessMessage(msg *cb.Envelope, addr string) (resp *ab.Broad
 		// a defer, resp gets the (always nil) current state of resp
 		// and not the return value
 		tracker.Record(resp)
+		logger.Warningf("[Debug by lz] ProcessMessage finished with response status: %s", resp.Status.String())
 	}()
 	tracker.BeginValidate()
 
+	logger.Warningf("[Debug by lz] Calling BroadcastChannelSupport to get message processor")
 	chdr, isConfig, processor, err := bh.SupportRegistrar.BroadcastChannelSupport(msg)
 	if chdr != nil {
 		tracker.ChannelID = chdr.ChannelId
 		tracker.TxType = cb.HeaderType(chdr.Type).String()
+		logger.Warningf("[Debug by lz] Message parsed - ChannelID: %s, Type: %s (%d), TxID: %s, isConfig: %v",
+			chdr.ChannelId, cb.HeaderType(chdr.Type).String(), chdr.Type, chdr.TxId, isConfig)
 	}
 	if err != nil {
+		logger.Warningf("[Debug by lz] Failed to get message processor: %s", err)
 		logger.Warningf("[channel: %s] Could not get message processor for serving %s: %s", tracker.ChannelID, addr, err)
 		return &ab.BroadcastResponse{Status: cb.Status_BAD_REQUEST, Info: err.Error()}
 	}
 
 	if !isConfig {
+		logger.Warningf("[Debug by lz] Processing NORMAL transaction - entering normal message flow")
 		logger.Debugf("[channel: %s] Broadcast is processing normal message from %s with txid '%s' of type %s", chdr.ChannelId, addr, chdr.TxId, cb.HeaderType_name[chdr.Type])
 
+		logger.Warningf("[Debug by lz] Calling processor.ProcessNormalMsg for validation")
 		configSeq, err := processor.ProcessNormalMsg(msg)
 		if err != nil {
+			logger.Warningf("[Debug by lz] ProcessNormalMsg failed: %s", err)
 			logger.Warningf("[channel: %s] Rejecting broadcast of normal message from %s because of error: %s", chdr.ChannelId, addr, err)
 			return &ab.BroadcastResponse{Status: ClassifyError(err), Info: err.Error()}
 		}
+		logger.Warningf("[Debug by lz] ProcessNormalMsg succeeded, configSeq: %d", configSeq)
 		tracker.EndValidate()
 
 		tracker.BeginEnqueue()
+		logger.Warningf("[Debug by lz] Calling processor.WaitReady to check consensus readiness")
 		if err = processor.WaitReady(); err != nil {
+			logger.Warningf("[Debug by lz] WaitReady failed: %s", err)
 			logger.Warningf("[channel: %s] Rejecting broadcast of message from %s with SERVICE_UNAVAILABLE: rejected by Consenter: %s", chdr.ChannelId, addr, err)
 			return &ab.BroadcastResponse{Status: cb.Status_SERVICE_UNAVAILABLE, Info: err.Error()}
 		}
-
+		logger.Warningf("[Debug by lz] WaitReady succeeded, now calling processor.Order")
 		err = processor.Order(msg, configSeq, 0, 0)
 		if err != nil {
+			logger.Warningf("[Debug by lz] processor.Order failed: %s", err)
 			logger.Warningf("[channel: %s] Rejecting broadcast of normal message from %s with SERVICE_UNAVAILABLE: rejected by Order: %s", chdr.ChannelId, addr, err)
 			return &ab.BroadcastResponse{Status: cb.Status_SERVICE_UNAVAILABLE, Info: err.Error()}
 		}
+		logger.Warningf("[Debug by lz] processor.Order completed successfully - transaction submitted to consensus")
 	} else { // isConfig
+		logger.Warningf("[Debug by lz] Processing CONFIG transaction - entering configuration update flow")
 		logger.Debugf("[channel: %s] Broadcast is processing config update message from %s", chdr.ChannelId, addr)
 
+		logger.Warningf("[Debug by lz] Calling processor.ProcessConfigUpdateMsg for config validation")
 		config, configSeq, err := processor.ProcessConfigUpdateMsg(msg)
 		if err != nil {
+			logger.Warningf("[Debug by lz] ProcessConfigUpdateMsg failed: %s", err)
 			logger.Warningf("[channel: %s] Rejecting broadcast of config message from %s because of error: %s", chdr.ChannelId, addr, err)
 			return &ab.BroadcastResponse{Status: ClassifyError(err), Info: err.Error()}
 		}
+		logger.Warningf("[Debug by lz] ProcessConfigUpdateMsg succeeded, configSeq: %d", configSeq)
 		tracker.EndValidate()
 
 		tracker.BeginEnqueue()
+		logger.Warningf("[Debug by lz] Calling processor.WaitReady for config consensus readiness")
 		if err = processor.WaitReady(); err != nil {
+			logger.Warningf("[Debug by lz] WaitReady failed for config: %s", err)
 			logger.Warningf("[channel: %s] Rejecting broadcast of message from %s with SERVICE_UNAVAILABLE: rejected by Consenter: %s", chdr.ChannelId, addr, err)
 			return &ab.BroadcastResponse{Status: cb.Status_SERVICE_UNAVAILABLE, Info: err.Error()}
 		}
 
+		logger.Warningf("[Debug by lz] WaitReady succeeded for config, now calling processor.Configure")
 		err = processor.Configure(config, configSeq)
 		if err != nil {
+			logger.Warningf("[Debug by lz] processor.Configure failed: %s", err)
 			logger.Warningf("[channel: %s] Rejecting broadcast of config message from %s with SERVICE_UNAVAILABLE: rejected by Configure: %s", chdr.ChannelId, addr, err)
 			return &ab.BroadcastResponse{Status: cb.Status_SERVICE_UNAVAILABLE, Info: err.Error()}
 		}
+		logger.Warningf("[Debug by lz] processor.Configure completed successfully - config update submitted")
 	}
 
 	logger.Debugf("[channel: %s] Broadcast has successfully enqueued message of type %s from %s", chdr.ChannelId, cb.HeaderType_name[chdr.Type], addr)

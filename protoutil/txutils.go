@@ -56,7 +56,6 @@ func GetEnvelopeFromBlock(data []byte) (*common.Envelope, error) {
 
 	return env, nil
 }
-
 // CreateSignedEnvelope creates a signed envelope of the desired type, with
 // marshaled dataMsg and signs it
 func CreateSignedEnvelope(

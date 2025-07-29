@@ -330,6 +330,15 @@ func (r *Registrar) BroadcastChannelSupport(msg *cb.Envelope) (*cb.ChannelHeader
 	return chdr, isConfig, cs, nil
 }
 
+
+func (r *Registrar) BroadcastChannelSupportWithoutVerify(channelID string) (*ChainSupport) {
+	cs := r.GetChain(channelID)
+	if cs == nil {
+		return nil
+	}
+	return cs
+}
+
 // GetConsensusChain retrieves the consensus.Chain of the channel, if it exists.
 func (r *Registrar) GetConsensusChain(chainID string) consensus.Chain {
 	r.lock.RLock()
@@ -470,6 +479,7 @@ func (r *Registrar) createNewChain(configtx *cb.Envelope) *ChainSupport {
 
 	// If we have no blocks, we need to create the genesis block ourselves.
 	if ledgerResources.Height() == 0 {
+		logger.Warningf("[Debug by lz] Create new chain")
 		if err := ledgerResources.Append(blockledger.CreateNextBlock(ledgerResources, []*cb.Envelope{configtx})); err != nil {
 			logger.Panicf("Error appending genesis block to ledger: %s", err)
 		}
@@ -664,6 +674,7 @@ func (r *Registrar) JoinChannel(channelID string, configBlock *cb.Block) (info t
 		return types.ChannelInfo{}, errors.WithMessagef(err, "failed saving joinblock to file repo for channel %s", channelID)
 	}
 	defer func() {
+		logger.Warningf("[Debug by lz] defer removeJoinBlock")
 		if err != nil {
 			if err2 := r.removeJoinBlock(channelID); err2 != nil {
 				logger.Warningf("Failed to cleanup joinblock for channel %s: %v", channelID, err2)
@@ -679,9 +690,11 @@ func (r *Registrar) JoinChannel(channelID string, configBlock *cb.Block) (info t
 	if configBlock.Header.Number == 0 && isMember {
 		chain, info, err := r.createAsMember(ledgerRes, configBlock, channelID)
 		if err == nil {
+			logger.Warningf("[Debug by lz] removeJoinBlock after createAsMember")
 			if err := r.removeJoinBlock(channelID); err != nil {
 				return types.ChannelInfo{}, err
 			}
+			// start nopaxos chain
 			chain.start()
 		}
 		return info, err
@@ -697,8 +710,10 @@ func (r *Registrar) JoinChannel(channelID string, configBlock *cb.Block) (info t
 	return info, err
 }
 
+// step 2: createAsMember for orderer in registrar.go (joinChannel)
 func (r *Registrar) createAsMember(ledgerRes *ledgerResources, configBlock *cb.Block, channelID string) (*ChainSupport, types.ChannelInfo, error) {
 	if ledgerRes.Height() == 0 {
+		logger.Warningf("[debug by lz] createAsMember")
 		if err := ledgerRes.Append(configBlock); err != nil {
 			return nil, types.ChannelInfo{}, errors.WithMessage(err, "failed to append join block to the ledger")
 		}

@@ -9,6 +9,8 @@ package chaincode
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
+	"net"
 	"time"
 
 	"github.com/hyperledger/fabric-lib-go/bccsp"
@@ -228,10 +230,22 @@ func (a *ApproverForMyOrg) Approve() error {
 		}
 	}
 
-	if err = a.BroadcastClient.Send(env); err != nil {
-		return errors.WithMessage(err, "failed to send transaction")
+	fmt.Println("[Debug by lz] send approve transaction to sequencer")
+	fmt.Println("[Debug by lz] env: ", env)
+	// TODO: send txid to sequencer
+
+	// Send complete transaction to sequencer
+	err = a.sendTxnToSequencer(env)
+	if err != nil {
+		fmt.Printf("[Debug by lz] Failed to send transaction to sequencer: %v\n", err)
+		// Continue with the normal flow even if sequencer send fails
 	}
 
+	// if err = a.BroadcastClient.Send(env); err != nil {
+	// 	return errors.WithMessage(err, "failed to send transaction")
+	// }
+
+	// 等待所有 peer 收到 txn
 	if dg != nil && ctx != nil {
 		// wait for event that contains the txID from all peers
 		err = dg.Wait(ctx)
@@ -332,4 +346,48 @@ func (a *ApproverForMyOrg) createProposal(inputTxID string) (proposal *pb.Propos
 	}
 
 	return proposal, txID, nil
+}
+
+// createUDPConnection creates a UDP connection to the sequencer
+func (a *ApproverForMyOrg) createUDPConnection() (*net.UDPConn, error) {
+	sequencerAddr, err := net.ResolveUDPAddr("udp", "172.20.10.3:7072")
+	if err != nil {
+		return nil, fmt.Errorf("error resolving sequencer address: %w", err)
+	}
+
+	conn, err := net.DialUDP("udp", nil, sequencerAddr)
+	if err != nil {
+		return nil, fmt.Errorf("error connecting to sequencer: %w", err)
+	}
+
+	return conn, nil
+}
+
+// sendTxnToSequencer sends the complete transaction envelope to sequencer
+func (a *ApproverForMyOrg) sendTxnToSequencer(env *cb.Envelope) error {
+	conn, err := a.createUDPConnection()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	// Marshal the transaction envelope
+	data, err := proto.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("failed to marshal envelope: %w", err)
+	}
+
+	// Add sequence bytes and front reserve bytes (same format as gateway server)
+	seqBytes := []byte{0x00, 0x00, 0x00, 0x00} // The extra bytes you want to add
+	dataWithseqBytes := append(data, seqBytes...)
+	frontResver := []byte{0x00, 0x00}
+	newType := append(frontResver, dataWithseqBytes...)
+
+	_, err = conn.Write(newType)
+	if err != nil {
+		return fmt.Errorf("failed to send transaction to sequencer: %w", err)
+	}
+
+	fmt.Printf("[Debug by lz] Sent complete transaction to sequencer successfully, payload size: %d bytes\n", len(data))
+	return nil
 }

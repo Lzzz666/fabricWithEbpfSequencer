@@ -18,6 +18,7 @@ import (
 	"github.com/hyperledger/fabric/internal/pkg/txflags"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
+	"google.golang.org/protobuf/proto"
 )
 
 var logger = flogging.MustGetLogger("history")
@@ -59,6 +60,15 @@ func (p *DBProvider) GetDBHandle(name string) *DB {
 	}
 }
 
+// GetDBHandleWithTxStore gets the handle to a named database with transaction store provider
+func (p *DBProvider) GetDBHandleWithTxStore(name string, txStoreProvider func() interface{}) *DB {
+	return &DB{
+		levelDB:         p.leveldbProvider.GetDBHandle(name),
+		name:            name,
+		txStoreProvider: txStoreProvider,
+	}
+}
+
 // Close closes the underlying db
 func (p *DBProvider) Close() {
 	p.leveldbProvider.Close()
@@ -71,8 +81,9 @@ func (p *DBProvider) Drop(channelName string) error {
 
 // DB maintains and provides access to history data for a particular channel
 type DB struct {
-	levelDB *leveldbhelper.DBHandle
-	name    string
+	levelDB         *leveldbhelper.DBHandle
+	name            string
+	txStoreProvider func() interface{} // 新增：交易儲存提供者
 }
 
 // Commit implements method in HistoryDB interface
@@ -80,7 +91,7 @@ func (d *DB) Commit(block *common.Block) error {
 	blockNo := block.Header.Number
 	// Set the starting tranNo to 0
 	var tranNo uint64
-
+	logger.Warningf("[Debug by lz] Commit with DB")
 	dbBatch := d.levelDB.NewUpdateBatch()
 
 	logger.Debugf("Channel [%s]: Updating history database for blockNo [%v] with [%d] transactions",
@@ -100,23 +111,92 @@ func (d *DB) Commit(block *common.Block) error {
 			continue
 		}
 
+		// 🔧 嘗試解析為 envelope，如果失敗則從 TransactionStore 查詢
 		env, err := protoutil.GetEnvelopeFromBlock(envBytes)
 		if err != nil {
-			return err
+			// 假設是 txid，嘗試從 TransactionStore 查詢
+			txid := string(envBytes)
+			logger.Warningf("[Debug by lz] Failed to parse envelope, trying as txid: %s", txid)
+
+			if d.txStoreProvider != nil {
+				txStore := d.txStoreProvider()
+				if txStore != nil {
+					// 嘗試轉換為 TransactionStore 介面
+					if ts, ok := txStore.(interface {
+						GetByID(string) (interface{}, bool)
+					}); ok {
+						if txData, found := ts.GetByID(txid); found {
+							// 嘗試轉換為 *common.Envelope
+							switch data := txData.(type) {
+							case *common.Envelope:
+								env = data
+								envBytes, err = proto.Marshal(env)
+								if err != nil {
+									logger.Warningf("[Debug by lz] Failed to marshal envelope for txid %s: %v", txid, err)
+									tranNo++
+									continue
+								}
+								logger.Warningf("[Debug by lz] Successfully retrieved envelope from store for txid: %s", txid)
+							case []byte:
+								// 嘗試解析為 envelope
+								envelope := &common.Envelope{}
+								if unmarshalErr := proto.Unmarshal(data, envelope); unmarshalErr == nil {
+									env = envelope
+									envBytes, err = proto.Marshal(env)
+									if err != nil {
+										logger.Warningf("[Debug by lz] Failed to marshal envelope for txid %s: %v", txid, err)
+										tranNo++
+										continue
+									}
+									logger.Warningf("[Debug by lz] Successfully unmarshaled envelope from store for txid: %s", txid)
+								} else {
+									logger.Warningf("[Debug by lz] Failed to unmarshal envelope for txid %s: %v", txid, unmarshalErr)
+									tranNo++
+									continue
+								}
+							default:
+								logger.Errorf("Channel [%s]: Unsupported transaction data type %T for txid: %s", d.name, txData, txid)
+								tranNo++
+								continue
+							}
+						} else {
+							logger.Errorf("Channel [%s]: Transaction not found in store for txid: %s", d.name, txid)
+							tranNo++
+							continue
+						}
+					} else {
+						logger.Errorf("Channel [%s]: Transaction store does not implement GetByID method", d.name)
+						tranNo++
+						continue
+					}
+				} else {
+					logger.Errorf("Channel [%s]: Transaction store provider returned nil", d.name)
+					tranNo++
+					continue
+				}
+			} else {
+				logger.Errorf("Channel [%s]: No transaction store provider available, cannot resolve txid: %s", d.name, txid)
+				tranNo++
+				continue
+			}
 		}
+		logger.Warningf("[Debug by lz] UnmarshalPayload %v", env)
+		logger.Warningf("[Debug by lz] UnmarshalPayload %v", env.Payload)
 
 		payload, err := protoutil.UnmarshalPayload(env.Payload)
 		if err != nil {
 			return err
 		}
-
+		logger.Warningf("[Debug by lz] UnmarshalPayload %v", payload)
 		chdr, err := protoutil.UnmarshalChannelHeader(payload.Header.ChannelHeader)
 		if err != nil {
 			return err
 		}
-
+		logger.Warningf("[Debug by lz] UnmarshalChannelHeader %v", chdr)
 		if common.HeaderType(chdr.Type) == common.HeaderType_ENDORSER_TRANSACTION {
 			// extract RWSet from transaction
+			// 這裡的 envBytes 是 txid 的 byte array 是錯誤ㄉ
+			// 我該如何拿到完整 envBytes 呢？
 			respPayload, err := protoutil.GetActionFromEnvelope(envBytes)
 			if err != nil {
 				return err

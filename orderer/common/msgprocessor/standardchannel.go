@@ -97,20 +97,58 @@ func (s *StandardChannel) ClassifyMsg(chdr *cb.ChannelHeader) Classification {
 // ProcessNormalMsg will check the validity of a message based on the current configuration.  It returns the current
 // configuration sequence number and nil on success, or an error if the message is not valid
 func (s *StandardChannel) ProcessNormalMsg(env *cb.Envelope) (configSeq uint64, err error) {
+	logger.Warningf("[Debug by lz] ProcessNormalMsg started - validating normal transaction")
+	// 獲得 orderer config
 	oc, ok := s.support.OrdererConfig()
 	if !ok {
 		logger.Panicf("Missing orderer config")
 	}
+	logger.Warningf("[Debug by lz] Retrieved orderer config successfully")
+	// 如果 consensus type migration 為 true，則需要檢查 consensus state 是否為 STATE_NORMAL
 	if oc.Capabilities().ConsensusTypeMigration() {
+		logger.Warningf("[Debug by lz] Checking consensus type migration capabilities")
 		if oc.ConsensusState() != orderer.ConsensusType_STATE_NORMAL {
+			logger.Warningf("[Debug by lz] Consensus state is not NORMAL, rejecting transaction")
 			return 0, errors.WithMessage(
 				ErrMaintenanceMode, "normal transactions are rejected")
 		}
+		logger.Warningf("[Debug by lz] Consensus state is NORMAL, continuing validation")
+	}
+
+	// 獲得 config sequence number
+	configSeq = s.support.Sequence()
+	logger.Warningf("[Debug by lz] Current config sequence: %d, applying filters", configSeq)
+	err = s.filters.Apply(env)
+	if err != nil {
+		logger.Warningf("[Debug by lz] Filter application failed: %s", err)
+	} else {
+		logger.Warningf("[Debug by lz] All filters passed successfully")
+	}
+	return
+}
+
+// ProcessNormalMsg will check the validity of a message based on the current configuration.  It returns the current
+// configuration sequence number and nil on success, or an error if the message is not valid
+func (s *StandardChannel) ProcessNormalMsgWithoutVerify() (configSeq uint64, err error) {
+	logger.Warningf("[Debug by lz] ProcessNormalMsgWithoutVerify started - bypassing validation checks")
+	oc, ok := s.support.OrdererConfig()
+	if !ok {
+		logger.Panicf("Missing orderer config")
+	}
+	logger.Warningf("[Debug by lz] Retrieved orderer config successfully (without verify)")
+	if oc.Capabilities().ConsensusTypeMigration() {
+		logger.Warningf("[Debug by lz] Checking consensus type migration capabilities (without verify)")
+		if oc.ConsensusState() != orderer.ConsensusType_STATE_NORMAL {
+			logger.Warningf("[Debug by lz] Consensus state is not NORMAL, rejecting transaction (without verify)")
+			return 0, errors.WithMessage(
+				ErrMaintenanceMode, "normal transactions are rejected")
+		}
+		logger.Warningf("[Debug by lz] Consensus state is NORMAL (without verify)")
 	}
 
 	configSeq = s.support.Sequence()
-	err = s.filters.Apply(env)
-	return
+	logger.Warningf("[Debug by lz] ProcessNormalMsgWithoutVerify completed, configSeq: %d", configSeq)
+	return configSeq, nil
 }
 
 // ProcessConfigUpdateMsg will attempt to apply the config impetus msg to the current configuration, and if successful
@@ -118,24 +156,32 @@ func (s *StandardChannel) ProcessNormalMsg(env *cb.Envelope) (configSeq uint64, 
 // is invalid, an error is returned.
 func (s *StandardChannel) ProcessConfigUpdateMsg(env *cb.Envelope) (config *cb.Envelope, configSeq uint64, err error) {
 	logger.Debugf("Processing config update message for existing channel %s", s.support.ChannelID())
+	logger.Warningf("[Debug by lz] ProcessConfigUpdateMsg started for channel %s", s.support.ChannelID())
 
 	// Call Sequence first.  If seq advances between proposal and acceptance, this is okay, and will cause reprocessing
 	// however, if Sequence is called last, then a success could be falsely attributed to a newer configSeq
 	seq := s.support.Sequence()
+	logger.Warningf("[Debug by lz] Current sequence number: %d, applying initial filters", seq)
 	err = s.filters.Apply(env)
 	if err != nil {
+		logger.Warningf("[Debug by lz] Initial filter check failed: %s", err)
 		return nil, 0, errors.WithMessage(err, "config update for existing channel did not pass initial checks")
 	}
+	logger.Warningf("[Debug by lz] Initial filters passed, proposing config update")
 
 	configEnvelope, err := s.support.ProposeConfigUpdate(env)
 	if err != nil {
+		logger.Warningf("[Debug by lz] ProposeConfigUpdate failed: %s", err)
 		return nil, 0, errors.WithMessagef(err, "error applying config update to existing channel '%s'", s.support.ChannelID())
 	}
+	logger.Warningf("[Debug by lz] Config update proposed successfully, creating signed envelope")
 
 	config, err = protoutil.CreateSignedEnvelope(cb.HeaderType_CONFIG, s.support.ChannelID(), s.support.Signer(), configEnvelope, msgVersion, epoch)
 	if err != nil {
+		logger.Warningf("[Debug by lz] CreateSignedEnvelope failed: %s", err)
 		return nil, 0, err
 	}
+	logger.Warningf("[Debug by lz] Signed envelope created, applying final filters")
 
 	// We re-apply the filters here, especially for the size filter, to ensure that the transaction we
 	// just constructed is not too large for our consenter.  It additionally reapplies the signature
@@ -144,13 +190,17 @@ func (s *StandardChannel) ProcessConfigUpdateMsg(env *cb.Envelope) (config *cb.E
 	// check is negligible, as this is the reconfig path and not the normal path.
 	err = s.filters.Apply(config)
 	if err != nil {
+		logger.Warningf("[Debug by lz] Final filter check failed: %s", err)
 		return nil, 0, errors.WithMessage(err, "config update for existing channel did not pass final checks")
 	}
+	logger.Warningf("[Debug by lz] Final filters passed, applying maintenance filter")
 
 	err = s.maintenanceFilter.Apply(config)
 	if err != nil {
+		logger.Warningf("[Debug by lz] Maintenance filter failed: %s", err)
 		return nil, 0, errors.WithMessage(err, "config update for existing channel did not pass maintenance checks")
 	}
+	logger.Warningf("[Debug by lz] ProcessConfigUpdateMsg completed successfully, seq: %d", seq)
 
 	return config, seq, nil
 }
@@ -159,12 +209,23 @@ func (s *StandardChannel) ProcessConfigUpdateMsg(env *cb.Envelope) (config *cb.E
 // extracts the `ConfigUpdate` from `LastUpdate` field, and calls `ProcessConfigUpdateMsg` on it.
 func (s *StandardChannel) ProcessConfigMsg(env *cb.Envelope) (config *cb.Envelope, configSeq uint64, err error) {
 	logger.Debugf("Processing config message for channel %s", s.support.ChannelID())
+	logger.Warningf("[Debug by lz] ProcessConfigMsg started for channel %s", s.support.ChannelID())
 
 	configEnvelope := &cb.ConfigEnvelope{}
+	logger.Warningf("[Debug by lz] Unmarshaling config envelope")
 	_, err = protoutil.UnmarshalEnvelopeOfType(env, cb.HeaderType_CONFIG, configEnvelope)
 	if err != nil {
+		logger.Warningf("[Debug by lz] Failed to unmarshal config envelope: %s", err)
 		return
 	}
+	logger.Warningf("[Debug by lz] Config envelope unmarshaled successfully, calling ProcessConfigUpdateMsg")
 
 	return s.ProcessConfigUpdateMsg(configEnvelope.LastUpdate)
+}
+func (s *StandardChannel) ProcessConfigMsgWithoutVerify() (config *cb.Envelope, configSeq uint64, err error) {
+
+	configEnvelope := &cb.ConfigEnvelope{}
+
+	return s.ProcessConfigUpdateMsg(configEnvelope.LastUpdate)
+
 }
