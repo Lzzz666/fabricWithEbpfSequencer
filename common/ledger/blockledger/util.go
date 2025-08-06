@@ -7,6 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 package blockledger
 
 import (
+	"fmt"
+
 	"github.com/hyperledger/fabric-lib-go/common/flogging"
 	cb "github.com/hyperledger/fabric-protos-go-apiv2/common"
 	ab "github.com/hyperledger/fabric-protos-go-apiv2/orderer"
@@ -46,6 +48,7 @@ func (nfei *NotFoundErrorIterator) Close() {}
 //
 //	to accommodate non-deterministic marshaling
 func CreateNextBlock(rl Reader, messages []*cb.Envelope) *cb.Block {
+	fmt.Println("messages in CreateNextBlock(blockledger/util.go): ", messages)
 	var nextBlockNumber uint64
 	var previousBlockHash []byte
 	var err error
@@ -78,7 +81,8 @@ func CreateNextBlock(rl Reader, messages []*cb.Envelope) *cb.Block {
 	block := protoutil.NewBlock(nextBlockNumber, previousBlockHash)
 	block.Header.DataHash = protoutil.ComputeBlockDataHash(data)
 	block.Data = data
-
+	fmt.Println("block.header.previousHash in CreateNextBlock(blockledger/util.go): ", block.Header.PreviousHash)
+	fmt.Println("block.header.hash in CreateNextBlock(blockledger/util.go): ", protoutil.BlockHeaderHash(block.Header))
 	return block
 }
 

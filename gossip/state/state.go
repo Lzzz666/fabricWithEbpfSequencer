@@ -752,7 +752,12 @@ func (s *GossipStateProviderImpl) addPayload(payload *proto.Payload, blockingMod
 	if payload == nil {
 		return errors.New("Given payload is nil")
 	}
-	s.logger.Debugf("[%s] Adding payload to local buffer, blockNum = [%d]", s.chainID, payload.SeqNum)
+	// if the payload is a transaction message  (gossip 用的 full transaction，不用存進 ledger)
+	if payload.SeqNum == 0xFFFFFFFFFFFFFFFF {
+		s.logger.Warningf("Ignoring transaction message with special sequence number marker")
+		return nil
+	}
+	s.logger.Warningf("[%s] Adding payload to local buffer, blockNum = [%d]", s.chainID, payload.SeqNum)
 	height, err := s.ledger.LedgerHeight()
 	if err != nil {
 		return errors.Wrap(err, "Failed obtaining ledger height")
@@ -790,6 +795,17 @@ func (s *GossipStateProviderImpl) straggler(currHeight uint64, receivedPayload *
 
 func (s *GossipStateProviderImpl) commitBlock(block *common.Block, pvtData util.PvtDataCollections) error {
 	t1 := time.Now()
+
+	s.logger.Warningf("[debug by lz] commitBlock - About to commit block %d", block.Header.Number)
+	s.logger.Warningf("[debug by lz] commitBlock - Block PreviousHash: %x", block.Header.PreviousHash)
+
+	// Get current ledger height before committing
+	currentHeight, err := s.ledger.LedgerHeight()
+	if err != nil {
+		s.logger.Errorf("Failed to get ledger height before commit: %v", err)
+	} else {
+		s.logger.Warningf("[debug by lz] commitBlock - Current ledger height: %d", currentHeight)
+	}
 
 	// Commit block with available private transactions
 	if err := s.ledger.StoreBlock(block, pvtData); err != nil {

@@ -215,7 +215,7 @@ func (c *coordinator) StoreBlock(block *common.Block, privateDataSets util.PvtDa
 		idDeserializerFactory:                   c.idDeserializerFactory,
 	}
 	// 這裡是取得 block 中 要寫入 private data 的 transaction 的資訊
-	// 如何這裡的 block 解開是只有 txid 的話，那麼就從 transaction store 中取得完整的交易並處理 （已完成）
+	// 如果這裡的 block 解開是只有 txid 的話，那麼就從 transaction store 中取得完整的交易並處理 （已完成）
 	pvtdataToRetrieve, err := c.getTxPvtdataInfoFromBlock(block)
 	if err != nil {
 		c.logger.Warningf("Failed to get private data info from block: %s", err)
@@ -447,7 +447,7 @@ func (c *coordinator) getTxInfoFromTransactionBytes(envBytes []byte) (*txInfo, e
 
 		// 從 transaction store 中根據 txID 獲取完整的交易
 		if c.txnStore != nil {
-			logger.Warningf("[Debug by lz] Mempool transactions: %v", c.txnStore.Get())
+			// logger.Warningf("[Debug by lz] Mempool transactions: %v", c.txnStore.Get())
 			logger.Warningf("[Debug by lz] Transaction store size: %d", c.txnStore.Size())
 
 			// 嘗試多種可能的 txID 格式

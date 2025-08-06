@@ -218,6 +218,7 @@ func (d *Deliverer) DeliverBlocks() {
 				d.orderers.Update(globalAddresses, orgAddresses)
 			}
 		}
+		
 		if err := blockReceiver.ProcessIncoming(onSuccess); err != nil {
 			switch err.(type) {
 			case *errRefreshEndpoint:

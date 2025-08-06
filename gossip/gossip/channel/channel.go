@@ -613,13 +613,14 @@ func (gc *gossipChannel) SetTransactionStore(store txnstore.TransactionStore) {
 
 // HandleMessage processes a message sent by a remote peer
 // 這裡會收到其他節點的 gossip message (目前只有 stateInfo 和 block)
+// peer0 的 commit block 是從這裡進來
 func (gc *gossipChannel) HandleMessage(msg protoext.ReceivedMessage) {
 	if !gc.verifyMsg(msg) {
 		gc.logger.Warning("Failed verifying message:", msg.GetGossipMessage().GossipMessage)
 		return
 	}
 	m := msg.GetGossipMessage()
-	gc.logger.Warningf("[Debug by lz] =================================")
+	gc.logger.Warningf("[Debug by lz] =================Next message================")
 	gc.logger.Warningf("[Debug by lz] peer Received message: %v", m.GossipMessage)
 	// 判斷是否 message 是 dataMsg 或 stateInfoMsg
 	gc.logger.Warningf("[Debug by lz] protoext.IsDataMsg(m.GossipMessage): %v", protoext.IsDataMsg(m.GossipMessage))
@@ -628,6 +629,7 @@ func (gc *gossipChannel) HandleMessage(msg protoext.ReceivedMessage) {
 	gc.logger.Warningf("[Debug by lz] protoext.IsChannelRestricted(m.GossipMessage): %v", protoext.IsChannelRestricted(m.GossipMessage))
 	gc.logger.Warningf("[Debug by lz] protoext.IsStateInfoPullRequestMsg(m.GossipMessage): %v", protoext.IsStateInfoPullRequestMsg(m.GossipMessage))
 	gc.logger.Warningf("[Debug by lz] protoext.IsStateInfoSnapshot(m.GossipMessage): %v", protoext.IsStateInfoSnapshot(m.GossipMessage))
+	gc.logger.Warningf("[Debug by lz] protoext.IsPullMsg(m.GossipMessage): %v", protoext.IsPullMsg(m.GossipMessage))
 	gc.logger.Warningf("[Debug by lz] protoext.IsDataUpdate(m.GossipMessage): %v", protoext.IsDataUpdate(m.GossipMessage))
 	gc.logger.Warningf("[Debug by lz] protoext.IsLeadershipMsg(m.GossipMessage): %v", protoext.IsLeadershipMsg(m.GossipMessage))
 
@@ -658,27 +660,40 @@ func (gc *gossipChannel) HandleMessage(msg protoext.ReceivedMessage) {
 
 	if protoext.IsDataMsg(m.GossipMessage) || protoext.IsStateInfoMsg(m.GossipMessage) {
 		added := false
-
 		if protoext.IsDataMsg(m.GossipMessage) {
 			if m.GetDataMsg().Payload == nil {
 				gc.logger.Warning("Payload is empty, got it from", msg.GetConnectionInfo().ID)
 				return
 			}
 
-			// Check if this is a transaction message
+			// Check if this is a full transaction message
+
 			if protoext.IsTxnMsg(m.GossipMessage) {
 				gc.logger.Warningf("[TxnMsg] Received transaction message from %v", msg.GetConnectionInfo().ID)
-				// Handle transaction message differently
 				gc.handleTxnMessage(m.GossipMessage, msg.GetConnectionInfo().ID)
-				// Still forward and demultiplex for transaction messages
-				// gc.Forward(msg)
-				// gc.DeMultiplex(m)
 				return
 			}
 
 			// Regular block message processing
 			// Would this block go into the message store if it was verified?
+			gc.logger.Warningf("[Debug by lz] BlockMsgStore contents:")
+			for i, msg := range gc.blockMsgStore.Get() {
+				signedMsg := msg.(*protoext.SignedGossipMessage)
+				// Add type checking to avoid panic
+				if protoext.IsDataMsg(signedMsg.GossipMessage) {
+					seqNum := signedMsg.GetDataMsg().Payload.SeqNum
+					if seqNum == 0xFFFFFFFFFFFFFFFF {
+						gc.logger.Warningf("[Debug by lz]   [%d] Transaction message (special marker)", i)
+					} else {
+						gc.logger.Warningf("[Debug by lz]   [%d] Block %d", i, seqNum)
+					}
+				} else {
+					gc.logger.Warningf("[Debug by lz]   [%d] Non-block message: %v", i, signedMsg.GossipMessage)
+				}
+			}
+
 			if !gc.blockMsgStore.CheckValid(msg.GetGossipMessage()) {
+				gc.logger.Warningf("[Debug by lz] blockMsgStore.CheckValid failed")
 				return
 			}
 			if !gc.verifyBlock(m.GossipMessage, msg.GetConnectionInfo().ID) {
@@ -689,6 +704,7 @@ func (gc *gossipChannel) HandleMessage(msg protoext.ReceivedMessage) {
 			added = gc.blockMsgStore.Add(msg.GetGossipMessage())
 			if added {
 				gc.logger.Debugf("Adding %v to the block puller", msg.GetGossipMessage())
+				gc.logger.Warningf("[Debug by lz] blockMsgStore.Add success")
 				gc.blocksPuller.Add(msg.GetGossipMessage())
 			}
 			gc.Unlock()
@@ -705,8 +721,9 @@ func (gc *gossipChannel) HandleMessage(msg protoext.ReceivedMessage) {
 		}
 		return
 	}
-
+	gc.logger.Warningf("[Debug by lz] protoext.IsPullMsg(m.GossipMessage) here")
 	if protoext.IsPullMsg(m.GossipMessage) && protoext.GetPullMsgType(m.GossipMessage) == proto.PullMsgType_BLOCK_MSG {
+		gc.logger.Warningf("[Debug by lz] protoext.IsPullMsg(m.GossipMessage) here")
 		if gc.hasLeftChannel() {
 			gc.logger.Info("Received Pull message from", msg.GetConnectionInfo().Endpoint, "but left the channel", string(gc.chainID))
 			return
@@ -725,6 +742,7 @@ func (gc *gossipChannel) HandleMessage(msg protoext.ReceivedMessage) {
 			// Iterate over the envelopes, and filter out blocks
 			// that we already have in the blockMsgStore, or blocks that
 			// are too far in the past.
+			gc.logger.Warningf("[Debug by lz] protoext.IsDataUpdate(m.GossipMessage) here")
 			var msgs []*protoext.SignedGossipMessage
 			var items []*proto.Envelope
 			filteredEnvelopes := []*proto.Envelope{}
@@ -846,7 +864,7 @@ func (gc *gossipChannel) handleTxnMessage(m *proto.GossipMessage, sender common.
 	gc.logger.Infof("[TxnMsg] Transaction add result: %v", addResult)
 	gc.logger.Infof("[TxnMsg] Transaction added to mempool")
 	gc.logger.Infof("[TxnMsg] Mempool size: %d", gc.txnMsgStore.Size())
-	gc.logger.Infof("[TxnMsg] Mempool transactions: %v", gc.txnMsgStore.Get())
+	// gc.logger.Infof("[TxnMsg] Mempool transactions: %v", gc.txnMsgStore.Get())
 
 	gc.logger.Infof("[TxnMsg] txid: %v", txid)
 	gc.logger.Infof("[TxnMsg] Mempool contains transaction: %v", gc.txnMsgStore.Contains(txid))
@@ -925,7 +943,7 @@ func (gc *gossipChannel) verifyBlock(msg *proto.GossipMessage, sender common.PKI
 	rawBlock := payload.Data
 
 	if seqNum == 0xFFFFFFFFFFFFFFFF {
-		// 这是 Transaction，不是 Block
+		// 这是 FullTransaction，不是 Block，是要存在 mempool 中的 transaction
 		txnEnvelope, err := protoutil.UnmarshalEnvelope(rawBlock)
 		if err != nil {
 			gc.logger.Warningf("[Debug by lz] Failed to unmarshal transaction from %v: %+v", sender, err)

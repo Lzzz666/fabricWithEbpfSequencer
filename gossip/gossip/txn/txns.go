@@ -105,6 +105,9 @@ type TransactionStore interface {
 
 	// Contains 检查是否包含特定 ID 的交易 (新增方法)
 	Contains(id string) bool
+
+	// Remove 根据交易 ID 移除特定交易 (新增方法)
+	Remove(id string) bool
 }
 
 type transactionStoreImpl struct {
@@ -373,4 +376,34 @@ func (s *transactionStoreImpl) Contains(id string) bool {
 	defer s.lock.RUnlock()
 	_, exists := s.txns[id]
 	return exists
+}
+
+// Remove 根据交易 ID 移除特定交易 (新增方法)
+func (s *transactionStoreImpl) Remove(id string) bool {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	// 檢查交易是否存在
+	txn, exists := s.txns[id]
+	if !exists {
+		return false // 交易不存在，無法移除
+	}
+
+	// 從 map 中刪除交易
+	delete(s.txns, id)
+
+	// 從順序列表中移除對應的 ID
+	for i, orderID := range s.txnOrder {
+		if orderID == id {
+			s.txnOrder = append(s.txnOrder[:i], s.txnOrder[i+1:]...)
+			break
+		}
+	}
+
+	// 如果交易已過期，需要調整過期計數
+	if txn.expired {
+		s.expiredCount--
+	}
+
+	return true // 成功移除
 }

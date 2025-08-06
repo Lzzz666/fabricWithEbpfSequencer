@@ -407,8 +407,9 @@ func (gs *Server) storeTransactionLocally(txn *common.Envelope, channelID string
 		fmt.Printf("[Debug by lz] Transaction %s already exists in store or was invalidated\n", txid)
 		return nil // 不算錯誤，可能是重複交易
 	}
-	
-	logger.Warningf("[Debug by lz] GetTransactionStore in gateway: %v", gs.transactionStore.Get())
+
+	logger.Warningf("[Debug by lz] GetTransactionStore in gateway: %v", gs.transactionStore.Size())
+	// logger.Warningf("[Debug by lz] GetTransactionStore in gateway: %v", gs.transactionStore.Get())
 	fmt.Printf("[Debug by lz] Successfully stored transaction %s in local mempool for channel %s\n", txid, channelID)
 	return nil
 }

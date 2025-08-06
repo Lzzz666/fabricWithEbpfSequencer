@@ -7,6 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 package multichannel
 
 import (
+	"fmt"
+
 	cb "github.com/hyperledger/fabric-protos-go-apiv2/common"
 	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/orderer/common/blockcutter"
@@ -92,6 +94,7 @@ func (mcs *ConsenterSupport) ChannelConfig() channelconfig.Channel {
 
 // CreateNextBlock creates a simple block structure with the given data
 func (mcs *ConsenterSupport) CreateNextBlock(data []*cb.Envelope) *cb.Block {
+	fmt.Println("data in CreateNextBlock: ", data)
 	block := protoutil.NewBlock(0, nil)
 	mtxs := make([][]byte, len(data))
 	for i := range data {

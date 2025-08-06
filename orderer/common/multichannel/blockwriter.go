@@ -66,6 +66,12 @@ func newBlockWriter(lastBlock *cb.Block, support blockWriterSupport) *BlockWrite
 func (bw *BlockWriter) CreateNextBlock(messages []*cb.Envelope) *cb.Block {
 	previousBlockHash := protoutil.BlockHeaderHash(bw.lastBlock.Header)
 
+	logger.Warningf("[debug by lz] CreateNextBlock - Channel: %s", bw.support.ChannelID())
+	logger.Warningf("[debug by lz] CreateNextBlock - Last block number: %d", bw.lastBlock.Header.Number)
+	logger.Warningf("[debug by lz] CreateNextBlock - Last block hash: %x", protoutil.BlockHeaderHash(bw.lastBlock.Header))
+	logger.Warningf("[debug by lz] CreateNextBlock - Previous hash for new block: %x", previousBlockHash)
+	logger.Warningf("[debug by lz] CreateNextBlock - Number of messages: %d", len(messages))
+
 	data := &cb.BlockData{
 		Data: make([][]byte, len(messages)),
 	}
@@ -82,15 +88,24 @@ func (bw *BlockWriter) CreateNextBlock(messages []*cb.Envelope) *cb.Block {
 	block.Header.DataHash = protoutil.ComputeBlockDataHash(data)
 	block.Data = data
 
+	logger.Warningf("[debug by lz] CreateNextBlock - New block number: %d", block.Header.Number)
+	logger.Warningf("[debug by lz] CreateNextBlock - New block previous hash: %x", block.Header.PreviousHash)
+	logger.Warningf("[debug by lz] CreateNextBlock - New block data hash: %x", block.Header.DataHash)
+
 	return block
 }
 func (bw *BlockWriter) CreateNextBlockWithoutVerify(messages [][]byte) *cb.Block {
+	logger.Warningf("[debug by lz] CreateNextBlockWithoutVerify - Channel: %s", bw.support.ChannelID())
+	logger.Warningf("[debug by lz] CreateNextBlockWithoutVerify - Last block number: %d", bw.lastBlock.Header.Number)
+	logger.Warningf("[debug by lz] CreateNextBlockWithoutVerify - Last block hash: %x", protoutil.BlockHeaderHash(bw.lastBlock.Header))
+	logger.Warningf("[debug by lz] CreateNextBlockWithoutVerify - Number of messages: %d", len(messages))
+
 	previousBlockHash := protoutil.BlockHeaderHash(bw.lastBlock.Header)
 
 	data := &cb.BlockData{
 		Data: make([][]byte, len(messages)),
 	}
-
+	// 這裡把 batch 的內容 copy 到 data.Data 中
 	copy(data.Data, messages)
 
 	block := protoutil.NewBlock(bw.lastBlock.Header.Number+1, previousBlockHash)

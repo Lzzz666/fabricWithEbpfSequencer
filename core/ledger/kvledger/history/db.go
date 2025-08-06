@@ -124,6 +124,7 @@ func (d *DB) Commit(block *common.Block) error {
 					// 嘗試轉換為 TransactionStore 介面
 					if ts, ok := txStore.(interface {
 						GetByID(string) (interface{}, bool)
+						Remove(string) bool
 					}); ok {
 						if txData, found := ts.GetByID(txid); found {
 							// 嘗試轉換為 *common.Envelope
@@ -137,6 +138,8 @@ func (d *DB) Commit(block *common.Block) error {
 									continue
 								}
 								logger.Warningf("[Debug by lz] Successfully retrieved envelope from store for txid: %s", txid)
+								// 使用完 mempool 的 transaction 後要刪除，避免 mempool 的 transaction 過多
+								ts.Remove(txid)
 							case []byte:
 								// 嘗試解析為 envelope
 								envelope := &common.Envelope{}
@@ -154,6 +157,8 @@ func (d *DB) Commit(block *common.Block) error {
 									tranNo++
 									continue
 								}
+								// 使用完 mempool 的 transaction 後要刪除，避免 mempool 的 transaction 過多
+								ts.Remove(txid)
 							default:
 								logger.Errorf("Channel [%s]: Unsupported transaction data type %T for txid: %s", d.name, txData, txid)
 								tranNo++

@@ -456,9 +456,13 @@ func serve(args []string) error {
 			EbMetadataProvider:              ebMetadataProvider,
 			TxStoreProvider: func() interface{} {
 				// 延遲獲取 TransactionStore，因為 GossipService 在 LedgerMgr 之後創建
+				logger.Warningf("[Debug by lz] TxStoreProvider called, GossipService is nil: %v", peerInstance.GossipService == nil)
 				if peerInstance.GossipService != nil {
-					return peerInstance.GossipService.GetTransactionStore()
+					txStore := peerInstance.GossipService.GetTransactionStore()
+					logger.Warningf("[Debug by lz] TxStoreProvider returned transaction store: %v", txStore)
+					return txStore
 				}
+				logger.Warningf("[Debug by lz] TxStoreProvider returning nil")
 				return nil
 			}, // 新增：交易儲存提供者
 		},

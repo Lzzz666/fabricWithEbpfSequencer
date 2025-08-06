@@ -34,6 +34,11 @@ type GossipBlockHandler struct {
 
 func (h *GossipBlockHandler) HandleBlock(channelID string, block *common.Block) error {
 	logger.Warningf("[Debug by lz] GossipBlockHandler.HandleBlock")
+	logger.Warningf("[Debug by lz] HandleBlock - Channel: %s", channelID)
+	logger.Warningf("[Debug by lz] HandleBlock - Block number: %d", block.GetHeader().GetNumber())
+	logger.Warningf("[Debug by lz] HandleBlock - Block previous hash: %x", block.GetHeader().GetPreviousHash())
+	logger.Warningf("[Debug by lz] HandleBlock - Block data hash: %x", block.GetHeader().GetDataHash())
+
 	if block == nil {
 		return errors.New("block from orderer could not be re-marshaled: proto: Marshal called with nil")
 	}
@@ -48,6 +53,8 @@ func (h *GossipBlockHandler) HandleBlock(channelID string, block *common.Block) 
 		Data:   marshaledBlock,
 		SeqNum: blockNum,
 	}
+
+	logger.Warningf("[Debug by lz] HandleBlock - Created payload with SeqNum: %d", blockNum)
 
 	// Use payload to create gossip message
 	gossipMsg := &gossip.GossipMessage{

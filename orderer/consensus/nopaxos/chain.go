@@ -12,6 +12,7 @@ import (
 	"github.com/hyperledger/fabric/orderer/consensus"
 	nopaxosConfig "github.com/hyperledger/fabric/orderer/consensus/nopaxos/config"
 	"github.com/hyperledger/fabric/orderer/consensus/nopaxos/protocol"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 	"google.golang.org/protobuf/proto"
 )
@@ -30,7 +31,8 @@ type chain struct {
 	consenters    []*etcdraft.Consenter
 	NopaxosServer *Server
 	Count         uint64
-	batch         [][]byte // 統一存儲序列化的 envelope bytes
+	batch         [][]byte        // 統一存儲序列化的 envelope bytes
+	processedTxs  map[string]bool // 新增：追蹤已處理的交易ID
 }
 
 type message struct {
@@ -104,8 +106,9 @@ func newChain(support consensus.ConsenterSupport, consenters []*etcdraft.Consent
 			nopaxosServerConfig,
 			deliverChan,
 		),
-		Count: 1,
-		batch: make([][]byte, 0),
+		Count:        1,
+		batch:        make([][]byte, 0),
+		processedTxs: make(map[string]bool),
 	}
 }
 
@@ -268,7 +271,7 @@ func (ch *chain) Configure(config *cb.Envelope, configSeq uint64) error {
 }
 
 func (ch *chain) ConfigureWithoutVerify(txid []byte, configSeq uint64) error {
-	logger.Warningf("[Debug by lz] ConfigureWithoutVerify started - configSeq: %d", configSeq)
+	logger.Warningf("[Debug by lz] ConfigureWithoutVerify started - txid: %s, configSeq: %d", string(txid), configSeq)
 	logger.Warningf("[Debug by lz] Sending config message to main loop")
 	select {
 	case ch.sendChan <- &message{
@@ -301,24 +304,37 @@ func (ch *chain) main() {
 		err = nil
 		select {
 		case msg := <-ch.sendChan:
-			logger.Warningf("[Debug by lz] Received message in main loop - configSeq: %d, current seq: %d", msg.configSeq, seq)
+			logger.Warningf("[Debug by lz] Received message in main loop - configSeq: %d, current seq: %d, txid: %s", msg.configSeq, seq, string(msg.txid))
 			// 如果 msg 有 txid，則是 normalMsg
+
 			if msg.txid != nil {
-				logger.Warningf("[Debug by lz] Processing normal transaction message")
+				logger.Warningf("[Debug by lz] Processing normal txid message")
 				// TxnMsg
 				if msg.configSeq < seq {
 					logger.Warningf("[Debug by lz] ConfigSeq (%d) < current seq (%d), calling ProcessNormalMsgWithoutVerify", msg.configSeq, seq)
 					_, err = ch.support.ProcessNormalMsgWithoutVerify()
 					if err != nil {
 						logger.Warningf("[Debug by lz] ProcessNormalMsgWithoutVerify failed: %s", err)
-						logger.Warningf("Discarding bad normal message: %s", err)
 						continue
 					}
 					logger.Warningf("[Debug by lz] ProcessNormalMsgWithoutVerify succeeded")
 				}
 
-				logger.Warningf("[Debug by lz] Adding txid to batch - current batch size: %d", len(ch.batch))
-				ch.batch = append(ch.batch, msg.txid)
+				// 檢查是否已經處理過這個 txid
+				txidStr := string(msg.txid)
+				if ch.processedTxs[txidStr] {
+					logger.Warningf("[Debug by lz] Duplicate txid detected, skipping: %s", txidStr)
+					continue
+				}
+				logger.Warningf("[Debug by lz] txid: %s", string(msg.txid))
+				logger.Warningf("[Debug by lz] ch.batch before append: %v, batch size: %d", ch.batch, len(ch.batch))
+
+				txidCopy := make([]byte, len(msg.txid))
+				copy(txidCopy, msg.txid)
+				ch.batch = append(ch.batch, txidCopy)
+				
+				ch.processedTxs[txidStr] = true
+				logger.Warningf("[Debug by lz] ch.batch after append: %v, batch size: %d", ch.batch, len(ch.batch))
 
 				if len(ch.batch) > 512 {
 					logger.Warningf("[Debug by lz] Batch size exceeded 512 (%d), creating block", len(ch.batch))
@@ -326,6 +342,8 @@ func (ch *chain) main() {
 					ch.support.WriteBlock(block, nil)
 					logger.Warningf("[Debug by lz] Block written successfully, clearing batch")
 					ch.batch = [][]byte{}
+					// TODO: 這裡有需要防止 race condition 嗎？
+					ch.processedTxs = make(map[string]bool) // 清空已處理交易記錄
 					if timer != nil {
 						timer = nil
 					}
@@ -371,8 +389,33 @@ func (ch *chain) main() {
 				block := ch.support.CreateNextBlock([]*cb.Envelope{msg.configMsg})
 				ch.support.WriteConfigBlock(block, nil)
 				timer = nil
+
 			} else if msg.hasFullEnvelope {
-				logger.Warningf("[Debug by lz] Processing normal transaction message")
+				// approve transaction message
+				logger.Warningf("[Debug by lz] Processing approve transaction message")
+
+				// 先從 envelope 中提取 txid 檢查重複
+				payload, err := protoutil.UnmarshalPayload(msg.normalMsg.Payload)
+				if err != nil {
+					logger.Warningf("[Debug by lz] Error unmarshaling payload: %v", err)
+					continue
+				}
+
+				chdr, err := protoutil.UnmarshalChannelHeader(payload.Header.ChannelHeader)
+				if err != nil {
+					logger.Warningf("[Debug by lz] Error unmarshaling channel header: %v", err)
+					continue
+				}
+
+				txidStr := chdr.TxId
+				logger.Warningf("[Debug by lz] Extracted txid from envelope: %s", txidStr)
+
+				// 檢查是否已經處理過這個 txid
+				if ch.processedTxs[txidStr] {
+					logger.Warningf("[Debug by lz] Duplicate txid detected (from envelope), skipping: %s", txidStr)
+					continue
+				}
+
 				msgBytes, err := proto.Marshal(msg.normalMsg)
 				if err != nil {
 					logger.Warningf("[Debug by lz] Failed to marshal envelope: %v", err)
@@ -381,6 +424,8 @@ func (ch *chain) main() {
 
 				logger.Warningf("[Debug by lz] Adding envelope to batch - current batch size: %d", len(ch.batch))
 				ch.batch = append(ch.batch, msgBytes)
+				ch.processedTxs[txidStr] = true
+				logger.Warningf("[Debug by lz] Added envelope txid to processed set: %s", txidStr)
 
 				if len(ch.batch) > 512 {
 					logger.Warningf("[Debug by lz] Batch size exceeded 512 (%d), creating block", len(ch.batch))
@@ -388,6 +433,7 @@ func (ch *chain) main() {
 					ch.support.WriteBlock(block, nil)
 					logger.Warningf("[Debug by lz] Block written successfully, clearing batch")
 					ch.batch = [][]byte{}
+					ch.processedTxs = make(map[string]bool) // 清空已處理交易記錄
 					if timer != nil {
 						timer = nil
 					}
@@ -424,14 +470,18 @@ func (ch *chain) main() {
 
 			if len(ch.batch) == 0 {
 				logger.Warningf("[Debug by lz] Timer expired but no pending transactions - possible bug")
-				logger.Warningf("Batch timer expired with no pending requests, this might indicate a bug")
 				continue
 			}
 			logger.Warningf("[Debug by lz] Creating block from %d pending transactions", len(ch.batch))
+			// 根據 batch 寫進入 block
+			// 為什麼這裡就已經出現重複的 txid
+			// ch.batch: [[100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97] [100 51 48 51 53 55 98 54 101 56 102 53 56 54 51 48 100 55 49 53 51 57 54 50 53 56 54 49 50 101 97 55 49 101 101 49 98 57 53 51 97 49 51 48 98 52 57 101 102 56 48 100 52 99 51 101 98 49 100 49 99 52 56 97]]
 			block := ch.support.CreateNextBlockWithoutVerify(ch.batch)
 			ch.support.WriteBlock(block, nil)
 			logger.Warningf("[Debug by lz] Block created and written successfully, clearing batch")
 			ch.batch = [][]byte{}
+			// 這裡有需要防止 race condition 嗎？
+			ch.processedTxs = make(map[string]bool) // 清空已處理交易記錄
 
 		case <-ch.exitChan:
 			logger.Warningf("[Debug by lz] Exit signal received, shutting down NOPaxos main loop")

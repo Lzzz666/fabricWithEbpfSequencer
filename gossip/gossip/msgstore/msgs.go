@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package msgstore
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -166,7 +167,7 @@ func (s *messageStoreImpl) Purge(shouldBePurged func(interface{}) bool) {
 func (s *messageStoreImpl) CheckValid(message interface{}) bool {
 	s.lock.RLock()
 	defer s.lock.RUnlock()
-
+	fmt.Println("message in CheckValid: ", message)
 	for _, m := range s.messages {
 		if s.pol(message, m.data) == common.MessageInvalidated {
 			return false

@@ -217,14 +217,17 @@ func preprocessProtoBlock(postOrderSimulatorProvider PostOrderSimulatorProvider,
 		txStatInfo := &TxStatInfo{TxType: -1}
 		txsStatInfo = append(txsStatInfo, txStatInfo)
 
+		logger.Warningf("[Debug by lz] envBytes in preprocessProtoBlock: %v", envBytes)
 		// 🔧 嘗試解析為完整交易 envelope
 		if env, err = protoutil.GetEnvelopeFromBlock(envBytes); err != nil {
 			// 🔧 如果失敗，假設是 txid，從外部儲存查詢
 			txid := string(envBytes)
-			logger.Debugf("[Debug by lz] Failed to parse as envelope, trying as txid: %s", txid)
+			logger.Warningf("[Debug by lz] Failed to parse as envelope, trying as txid: %s", txid)
+			logger.Warningf("[Debug by lz] txStoreProvider is nil: %v", txStoreProvider == nil)
 
 			if txStoreProvider != nil {
 				txStore := txStoreProvider()
+				logger.Warningf("[Debug by lz] txStore is nil: %v", txStore == nil)
 				if txStore != nil {
 					// 嘗試轉換為 TransactionStore 介面
 					if ts, ok := txStore.(interface {
@@ -236,14 +239,14 @@ func preprocessProtoBlock(postOrderSimulatorProvider PostOrderSimulatorProvider,
 							switch data := txData.(type) {
 							case *common.Envelope:
 								envelope = data
-								logger.Debugf("[Debug by lz] Retrieved Envelope directly from store for txid: %s", txid)
+								logger.Warningf("[Debug by lz] Retrieved Envelope directly from store for txid: %s", txid)
 							case []byte:
 								// 嘗試解析為 envelope
 								envelope = &common.Envelope{}
 								if unmarshalErr := proto.Unmarshal(data, envelope); unmarshalErr == nil {
-									logger.Debugf("[Debug by lz] Successfully unmarshaled Envelope from bytes for txid: %s", txid)
+									logger.Warningf("[Debug by lz] Successfully unmarshaled Envelope from bytes for txid: %s", txid)
 								} else {
-									logger.Errorf("[Debug by lz] Failed to unmarshal Envelope from bytes for txid %s: %v", txid, unmarshalErr)
+									logger.Warningf("[Debug by lz] Failed to unmarshal Envelope from bytes for txid %s: %v", txid, unmarshalErr)
 									txsFilter.SetFlag(txIndex, peer.TxValidationCode_INVALID_OTHER_REASON)
 									continue
 								}
@@ -252,9 +255,9 @@ func preprocessProtoBlock(postOrderSimulatorProvider PostOrderSimulatorProvider,
 								txsFilter.SetFlag(txIndex, peer.TxValidationCode_INVALID_OTHER_REASON)
 								continue
 							}
-
+							logger.Warningf("[Debug by lz] envelope in preprocessProtoBlock: %v", envelope)
 							env = envelope
-							logger.Debugf("[Debug by lz] Successfully retrieved transaction from store for txid: %s", txid)
+							logger.Warningf("[Debug by lz] Successfully retrieved transaction from store for txid: %s", txid)
 
 							// 🔧 序列化新的 envelope 以供後續使用
 							var marshalErr error
@@ -285,12 +288,19 @@ func preprocessProtoBlock(postOrderSimulatorProvider PostOrderSimulatorProvider,
 				continue
 			}
 		}
+		logger.Warningf("[Debug by lz] env here in preprocessProtoBlock: %v", env)
+		// 🔧 檢查 env 是否為 nil，避免空指針解引用
+		if env == nil {
+			logger.Errorf("[Debug by lz] Envelope is nil for transaction at index %d, marking as invalid", txIndex)
+			// txsFilter.SetFlag(txIndex, peer.TxValidationCode_INVALID_OTHER_REASON)
+			continue
+		}
 
 		// 🔧 解析 envelope 獲取 payload 和 channel header
 		if payload, err = protoutil.UnmarshalPayload(env.Payload); err == nil {
 			chdr, err = protoutil.UnmarshalChannelHeader(payload.Header.ChannelHeader)
 		}
-
+		logger.Warningf("[Debug by lz] payload in preprocessProtoBlock: %v", payload)
 		// 🔧 安全地獲取 TxID，避免 nil pointer
 		if chdr != nil {
 			txStatInfo.TxIDFromChannelHeader = chdr.GetTxId()

@@ -89,7 +89,7 @@ func (br *BlockReceiver) Stop() {
 // ProcessIncoming processes incoming messages until stopped or encounters an error.
 func (br *BlockReceiver) ProcessIncoming(onSuccess func(blockNum uint64, channelConfig *common.Config)) error {
 	var err error
-
+	br.logger.Warningf("ProcessIncoming")
 RecvLoop: // Loop until the endpoint is refreshed, or there is an error on the connection
 	for {
 		select {

@@ -50,12 +50,15 @@ func GetEnvelopeFromBlock(data []byte) (*common.Envelope, error) {
 	// Block always begins with an envelope
 	var err error
 	env := &common.Envelope{}
+	if len(data) < 70 {
+		return nil, errors.New("data len is less than 70")
+	}
 	if err = proto.Unmarshal(data, env); err != nil {
 		return nil, errors.Wrap(err, "error unmarshalling Envelope")
 	}
-
 	return env, nil
 }
+
 // CreateSignedEnvelope creates a signed envelope of the desired type, with
 // marshaled dataMsg and signs it
 func CreateSignedEnvelope(
